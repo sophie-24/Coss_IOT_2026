@@ -59,6 +59,21 @@
                 <span class="text-xl font-extrabold text-[#333D4B]">{{ state.currentStatus.riskScore }} %</span>
               </div>
             </div>
+            
+            <div class="pt-4 border-t border-gray-50 grid grid-cols-2 gap-4">
+              <div class="space-y-1">
+                <p class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">중재 메시지</p>
+                <p v-if="state.mediationSentStatus" class="text-sm font-bold text-blue-600">발송됨</p>
+                <p v-else class="text-sm font-medium text-gray-500">대기중</p>
+                <p v-if="state.mediationSentTime" class="text-xs text-gray-400">{{ state.mediationSentTime }}</p>
+              </div>
+              <div class="space-y-1">
+                <p class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">사과 메시지</p>
+                <p v-if="state.apologySentStatus" class="text-sm font-bold text-blue-600">발송됨</p>
+                <p v-else class="text-sm font-medium text-gray-500">대기중</p>
+                <p v-if="state.apologySentTime" class="text-xs text-gray-400">{{ state.apologySentTime }}</p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -91,25 +106,27 @@
           <table class="w-full text-left">
             <thead>
               <tr class="text-[11px] font-bold text-gray-400 uppercase tracking-widest border-b border-gray-50 bg-gray-50/30">
-                <th class="px-8 py-4">감지 시간</th>
+                <th class="px-8 py-4">최초 감지 시각</th>
+                <th class="px-8 py-4">지속 시간</th>
                 <th class="px-8 py-4">유형</th>
-                <th class="px-8 py-4 font-mono">강도(dB)</th>
+                <th class="px-8 py-4 font-mono">최대 강도(dB)</th>
                 <th class="px-8 py-4 text-right">상태</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-50 text-sm text-[#333D4B]">
-              <tr v-for="event in state.recentEvents" :key="event.id" class="hover:bg-gray-50/50 transition-colors">
-                <td class="px-8 py-5 text-gray-400 font-medium">{{ event.time }}</td>
+              <tr v-for="event in displayEvents" :key="event.id" class="hover:bg-gray-50/50 transition-colors" :class="{ 'bg-blue-50/30': activeEventGroup && event.id === activeEventGroup.id }">
+                <td class="px-8 py-5 text-gray-400 font-medium">{{ event.startTimeString }}</td>
+                <td class="px-8 py-5 text-gray-400 font-medium">{{ event.duration }}초</td>
                 <td class="px-8 py-5 font-bold">{{ event.type }}</td>
-                <td class="px-8 py-5 font-mono font-bold">{{ event.db }}</td>
+                <td class="px-8 py-5 font-mono font-bold">{{ event.maxDb }}</td>
                 <td class="px-8 py-5 text-right font-bold">
                   <span :class="statusStyles[event.level].badge" class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter">
                     {{ event.level }}
                   </span>
                 </td>
               </tr>
-              <tr v-if="state.recentEvents.length === 0">
-                <td colspan="4" class="px-8 py-20 text-center text-gray-400 font-medium">Mobius 데이터를 수신 중입니다...</td>
+              <tr v-if="displayEvents.length === 0">
+                <td colspan="5" class="px-8 py-20 text-center text-gray-400 font-medium">Mobius 데이터를 수신 중입니다...</td>
               </tr>
             </tbody>
           </table>
@@ -133,11 +150,20 @@ import {
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
 
-// --- 1. 타입 정의 (인덱싱 에러 방지) ---
+// --- 1. 타입 정의 ---
 type StatusLevel = 'safe' | 'warning' | 'danger'
 interface StatusStyle { bg: string; text: string; badge: string; }
 interface StatusInfo { level: StatusLevel; label: string; description: string; avgDb: number; riskScore: number; }
-interface NoiseEvent { id: number; time: string; type: string; db: number; probability: number; level: StatusLevel; location: string; note: string; }
+// Mobius에서 수신하는 원본 이벤트 타입
+interface NoiseEvent {
+  id: number; time: string; type: string; db: number; probability: number;
+  level: StatusLevel; location: string; note: string; lastUpdatedAt: Date;
+}
+// 히스토리 테이블에 표시될 그룹화된 이벤트 타입
+interface EventGroup {
+  id: number; type: string; startTime: Date; lastTime: Date; startTimeString: string;
+  duration: number; maxDb: number; level: StatusLevel; location: string;
+}
 
 // --- 2. 스타일 및 상수 ---
 const statusStyles: Record<StatusLevel, StatusStyle> = {
@@ -145,129 +171,187 @@ const statusStyles: Record<StatusLevel, StatusStyle> = {
   warning: { bg: 'bg-amber-50 shadow-[inset_0_2px_10px_rgba(245,158,11,0.1)]', text: 'text-amber-500', badge: 'bg-amber-100 text-amber-600' },
   danger: { bg: 'bg-rose-50 shadow-[inset_0_2px_10px_rgba(244,63,94,0.1)]', text: 'text-rose-500', badge: 'bg-rose-100 text-rose-600' }
 }
-
 const buildingName = '동국대학교 D-Log'
 const unitName = '3140호'
+const CHART_MAX_LENGTH = 30; // 차트에 표시할 최대 데이터 포인트 수
 
 // --- 3. 상태 관리 ---
 const state = reactive<{
   currentStatus: StatusInfo;
   latestEvent: NoiseEvent;
-  recentEvents: NoiseEvent[];
+  recentEvents: EventGroup[]; // 완료된 이벤트 그룹 목록
+  // [추가] 중재 및 사과 메시지 상태 및 시각
+  mediationSentStatus: boolean;
+  mediationSentTime: string | null;
+  apologySentStatus: boolean;
+  apologySentTime: string | null;
 }>({
   currentStatus: { level: 'safe', label: '준비', description: '관제 시스템을 초기화 중입니다.', avgDb: 0, riskScore: 0 },
-  latestEvent: { id: 0, time: '-', type: '대기 중', db: 0, probability: 0, level: 'safe', location: '-', note: '연결 확인 중...' },
-  recentEvents: []
+  latestEvent: { id: 0, time: '-', type: '대기 중', db: 0, probability: 0, level: 'safe', location: '-', note: '연결 확인 중...', lastUpdatedAt: new Date(0) },
+  recentEvents: [],
+  // 초기값 설정
+  mediationSentStatus: false,
+  mediationSentTime: null,
+  apologySentStatus: false,
+  apologySentTime: null,
 })
 
-const isLoading = ref(false)
-const error = ref<string | null>(null)
-let alertAudio: HTMLAudioElement | null = null
+const activeEventGroup = ref<EventGroup | null>(null); // 현재 진행중인 이벤트 그룹
+const now = ref(new Date()); // 지속시간 계산을 위한 실시간 시간
+const isLoading = ref(false);
+const error = ref<string | null>(null);
+let alertAudio: HTMLAudioElement | null = null;
 
-// --- 4. Mobius API 설정 ---
-const CONFIG = {
-  // 백엔드 프록시 API를 통해 Mobius 데이터 호출
-  url: 'http://localhost:8080/get_latest_noise_data'
-}
+// 실시간 차트 전용 데이터
+const liveChartLabels = ref<string[]>([]);
+const liveChartData = ref<number[]>([]);
 
-// --- 5. 데이터 연동 및 처리 ---
+// --- 4. API 설정 ---
+const CONFIG = { url: 'http://localhost:8080/get_latest_noise_data' }
+
+// --- 5. 데이터 처리 로직 ---
 const fetchMobiusData = async () => {
-  isLoading.value = true
+  isLoading.value = true;
   try {
-    // 백엔드 API 호출 시 더 이상 Mobius 전용 헤더는 필요 없음
-    const res = await axios.get(CONFIG.url)
-    
-    // 백엔드가 이미 한번 파싱했으므로, 바로 데이터 사용
-    const parsed = res.data
-    if (parsed) {
-      processUpdate(parsed)
-      error.value = null
+    const res = await axios.get(CONFIG.url);
+    if (res.data && Object.keys(res.data).length > 0) {
+      processUpdate(res.data);
+      error.value = null;
     }
-  } catch (err: any) {
-    error.value = `수신 에러: ${err.message}`
-  } finally {
-    isLoading.value = false
-  }
+  } catch (err: any) { error.value = `수신 에러: ${err.message}`; } 
+  finally { isLoading.value = false; }
 }
 
+const severityToLevel = (sev: string): StatusLevel => {
+  const s = (sev || 'green').toLowerCase();
+  if (s === 'red' || s === 'danger') return 'danger';
+  if (s === 'yellow' || s === 'warning') return 'warning';
+  return 'safe';
+}
+
+const levelToNumber = (level: StatusLevel): number => {
+  if (level === 'danger') return 2;
+  if (level === 'warning') return 1;
+  return 0;
+}
+
+// 진행중인 이벤트를 완료하고 히스토리에 추가
+const finalizeActiveGroup = () => {
+  if (activeEventGroup.value) {
+    activeEventGroup.value.duration = Math.round((activeEventGroup.value.lastTime.getTime() - activeEventGroup.value.startTime.getTime()) / 1000);
+    if (activeEventGroup.value.duration >= 2) {
+      state.recentEvents.unshift({ ...activeEventGroup.value });
+      if (state.recentEvents.length > 10) state.recentEvents.pop();
+    }
+  }
+  activeEventGroup.value = null;
+}
+
+// Mobius에서 받은 데이터를 처리하는 메인 함수
 const processUpdate = (data: any) => {
-  // 0. 디버깅: 데이터가 실제로 어떻게 들어오는지 확인
-  console.log("실시간 수신 데이터:", data);
+  const analysis = data.analysis || data;
+  if (!analysis.result && typeof analysis.db_level === 'undefined') return;
 
-  // 1. 데이터 유효성 검사 (빈 객체 {} 방지)
-  if (!data || Object.keys(data).length === 0) {
-    console.warn("수신된 데이터가 비어있습니다.");
-    return;
+  const eventTime = new Date();
+  
+  // 노트 메시지 생성 로직
+  const notes = [];
+  // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
+  const isApologySent = analysis.apology_sent || data.action?.apology_sent; 
+  const isMediationSent = analysis.mediation_sent || data.action?.mediation_sent;
+
+  if (isApologySent) {
+    notes.push('사과 메시지 발송됨');
+    state.apologySentStatus = true;
+    // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
+    state.apologySentTime = analysis.apology_timestamp || eventTime.toLocaleTimeString('ko-KR', { hour12: false });
+  } else {
+    state.apologySentStatus = false;
+    state.apologySentTime = null;
+  }
+  if (isMediationSent) {
+    state.mediationSentStatus = true;
+    // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
+    state.mediationSentTime = analysis.mediation_timestamp || eventTime.toLocaleTimeString('ko-KR', { hour12: false });
+  } else {
+    state.mediationSentStatus = false;
+    state.mediationSentTime = null;
   }
 
-  /**
-   * [핵심 수정] 유연한 데이터 매핑
-   * data 안에 analysis가 있으면 그걸 쓰고, 없으면 data 자체를 analysis로 취급합니다.
-   */
-  const analysis = data.analysis ? data.analysis : data;
-  
-  // 만약 핵심 필드인 result(또는 db_level)가 없다면 구조가 잘못된 것
-  if (!analysis.result && !analysis.db_level) {
-    console.error("데이터 구조가 예상과 다릅니다. 'analysis' 또는 'result' 필드가 없습니다.", data);
-    return;
-  }
+  const note = notes.length > 0 ? notes.join(', ') : '모니터링 중';
 
-  // 2. severity에 따른 상태(StatusLevel) 매핑
-  const sev = analysis.severity || 'Green';
-  const level: StatusLevel = (sev === 'Red' || sev === 'danger') ? 'danger' : 
-                             (sev === 'Yellow' || sev === 'warning') ? 'warning' : 'safe';
-  
-  // 3. 시간 설정
-  const now = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  const newEvent: NoiseEvent = {
+    id: eventTime.getTime(),
+    time: eventTime.toLocaleTimeString('ko-KR', { hour12: false }),
+    type: analysis.result || '소음 감지',
+    db: analysis.db_level ?? 0,
+    probability: (analysis.probability ?? 1) * 100,
+    level: severityToLevel(analysis.severity),
+    location: analysis.target || data.action?.target || '측정 구역',
+    note: note,
+    lastUpdatedAt: eventTime,
+  };
 
-  // 4. 알림음 (Red/danger 등급 시 실행)
-  if (level === 'danger') {
+  state.latestEvent = newEvent;
+  state.currentStatus = {
+    level: newEvent.level,
+    label: newEvent.level === 'safe' ? '안전' : (newEvent.level === 'warning' ? '주의' : '위험'),
+    description: `${newEvent.type} 감지 - ${newEvent.note}`,
+    avgDb: newEvent.db,
+    riskScore: newEvent.level === 'safe' ? 10 : (newEvent.level === 'warning' ? 45 : 95)
+  };
+  
+  if (newEvent.level === 'danger') {
     if (!alertAudio) alertAudio = new Audio('/sounds/alert.wav');
     alertAudio.play().catch(() => {});
   }
 
-  // 5. 새로운 이벤트 객체 생성 (Optional Chaining ?. 을 사용하여 에러 방지)
-  const newEvent: NoiseEvent = {
-    id: Date.now(),
-    time: now,
-    type: analysis.result || '소음 감지', 
-    db: analysis.db_level ?? 0,
-    probability: (analysis.probability ?? 1) * 100,
-    level,
-    location: analysis.target || data.action?.target || '측정 구역',
-    note: (analysis.mediation_sent || data.action?.mediation_sent) ? '중재 메시지 발송됨' : '모니터링 중'
-  };
-
-  // 6. 상태 업데이트 (UI 반영)
-  state.latestEvent = newEvent;
-  state.currentStatus = {
-    level,
-    label: level === 'safe' ? '안전' : (level === 'warning' ? '주의' : '위험'),
-    description: `${newEvent.type} 감지 - ${newEvent.note}`,
-    avgDb: newEvent.db,
-    riskScore: level === 'safe' ? 10 : (level === 'warning' ? 45 : 95)
-  };
-  
-  // 7. 최근 이벤트 목록에 추가 (중복 방지 및 최신순 정렬)
-  if (state.recentEvents.length === 0 || state.recentEvents[0].time !== now) {
-    state.recentEvents = [newEvent, ...state.recentEvents].slice(0, 10);
+  // --- 이벤트 그룹화 로직 ---
+  if (!activeEventGroup.value) {
+    activeEventGroup.value = {
+      id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, level: newEvent.level, location: newEvent.location
+    };
+  } else if (activeEventGroup.value.type === newEvent.type) {
+    activeEventGroup.value.lastTime = eventTime;
+    if (newEvent.db > activeEventGroup.value.maxDb) activeEventGroup.value.maxDb = newEvent.db;
+    if (levelToNumber(newEvent.level) > levelToNumber(activeEventGroup.value.level)) activeEventGroup.value.level = newEvent.level;
+  } else {
+    finalizeActiveGroup();
+    activeEventGroup.value = {
+      id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, level: newEvent.level, location: newEvent.location
+    };
   }
 };
 
-// --- 6. 시각화 (Chart.js) 설정 ---
+// --- 6. UI 렌더링을 위한 Computed 속성 ---
+// 히스토리 테이블에 표시될 최종 목록 (진행중 이벤트 + 완료된 이벤트)
+const displayEvents = computed((): EventGroup[] => {
+  const events: EventGroup[] = [];
+  if (activeEventGroup.value) {
+    const activeGroupForDisplay: EventGroup = {
+      ...activeEventGroup.value,
+      duration: Math.round((now.value.getTime() - activeEventGroup.value.startTime.getTime()) / 1000)
+    };
+    events.push(activeGroupForDisplay);
+  }
+  events.push(...state.recentEvents);
+  return events;
+});
+
+// 실시간 차트 데이터
 const chartData = computed(() => ({
-  labels: state.recentEvents.slice().reverse().map(e => e.time.split(':').slice(1).join(':')),
+  labels: liveChartLabels.value,
   datasets: [{
     label: 'dB',
-    data: state.recentEvents.slice().reverse().map(e => e.db),
+    data: liveChartData.value,
     borderColor: '#3182F6',
     backgroundColor: 'rgba(49, 130, 246, 0.1)',
     fill: true,
     tension: 0.4,
-    pointRadius: 6,
-    pointBackgroundColor: state.recentEvents.slice().reverse().map(e => 
-      e.level === 'danger' ? '#F43F5E' : e.level === 'warning' ? '#F59E0B' : '#10B981'
-    )
+    pointRadius: 2,
+    pointBackgroundColor: '#3182F6'
   }]
 }))
 
@@ -275,47 +359,133 @@ const chartOptions = {
   responsive: true,
   maintainAspectRatio: false,
   plugins: { legend: { display: false }, tooltip: { enabled: true } },
-  scales: { y: { min: 20, max: 100, grid: { color: '#F2F4F6' } }, x: { grid: { display: false } } }
+  scales: { 
+    y: { min: 20, max: 100, grid: { color: '#F2F4F6' } }, 
+    x: { 
+      display: true,
+      grid: { display: false },
+      ticks: {
+        font: { size: 9 },
+        color: '#6B7280',
+        maxRotation: 0,
+        autoSkip: true,
+        autoSkipPadding: 20,
+      }
+    } 
+  },
+  animation: false as const, // 실시간 업데이트 시에는 false로 설정
 }
 
-// --- 7. 리포트 추출 (CSV & PDF) ---
-const exportToCSV = () => {
-  const headers = ['시간', '유형', '강도(dB)', '정확도(%)', '상태']
-  const rows = state.recentEvents.map(e => [e.time, e.type, e.db, e.probability, e.level])
-  let csv = "\uFEFF" + headers.join(",") + "\n"
-  rows.forEach(r => { csv += r.join(",") + "\n" })
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url; a.download = `DLOG_Report_${Date.now()}.csv`; a.click()
-}
+// 실시간 차트 업데이트 함수
+const updateLiveChart = () => {
+    const newLabels = [...liveChartLabels.value];
+    const newData = [...liveChartData.value];
+  
+    const date = new Date();
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    const timeString = `${hours}'${minutes}'${seconds}`;
+    
+    let newDbValue = Math.random() * 10 + 30; // 기본 baseline
+    // 마지막으로 실제 이벤트가 수신된 지 2.1초가 지나지 않았다면 실제 db값을 사용
+    if (new Date().getTime() - state.latestEvent.lastUpdatedAt.getTime() < 2100) {
+      newDbValue = state.latestEvent.db;
+    }
 
-const exportToPDF = async () => {
-  const element = document.getElementById('report-area')
-  if (!element) return
-  isLoading.value = true
-  try {
-    const canvas = await html2canvas(element, { scale: 2, useCORS: true })
-    const imgData = canvas.toDataURL('image/png')
-    const pdf = new jsPDF('p', 'mm', 'a4')
-    const pdfWidth = pdf.internal.pageSize.getWidth()
-    const pdfHeight = (canvas.height * pdfWidth) / canvas.width
-    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight)
-    pdf.save(`DLOG_Evidence_${Date.now()}.pdf`)
-  } catch (err) {
-    console.error(err)
-  } finally {
-    isLoading.value = false
+  newLabels.push(timeString);
+  newData.push(newDbValue);
+
+  if (newLabels.length > CHART_MAX_LENGTH) {
+    newLabels.shift();
+    newData.shift();
   }
-}
+  
+  // 배열 전체를 교체하여 반응성 오류 방지
+  liveChartLabels.value = newLabels;
+  liveChartData.value = newData;
+};
 
-// --- 8. 라이프사이클 ---
-let timer: any = null
+
+// --- 7. 리포트 추출 ---
+const exportToCSV = () => {
+  const headers = ['최초 감지 시각', '지속 시간(초)', '유형', '최대 강도(dB)', '상태'];
+  const rows = displayEvents.value.map(e => [
+    e.startTimeString,
+    e.duration,
+    e.type,
+    e.maxDb,
+    e.level
+  ]);
+  let csv = "\uFEFF" + headers.join(",") + "\n";
+  rows.forEach(r => { csv += r.join(",") + "\n"; });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `DLOG_Report_${new Date().toISOString().split('T')[0]}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const exportToPDF = async () => { 
+  const element = document.getElementById('report-area');
+  if (!element) return;
+  isLoading.value = true;
+  try {
+    const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+    const imgData = canvas.toDataURL('image/png');
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+    pdf.save(`DLOG_Evidence_${new Date().toISOString().split('T')[0]}.pdf`);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    isLoading.value = false;
+  }
+};
+
+
+// --- 8. 라이프사이클 훅 ---
+let mobiusTimer: any, watchdogTimer: any, nowTimer: any, chartTimer: any;
+
 onMounted(() => {
-  fetchMobiusData()
-  timer = setInterval(fetchMobiusData, 2000)
+  // 차트 데이터 초기화
+  const initialTime = new Date();
+  const initialLabels: string[] = [];
+  const initialData: number[] = [];
+  for (let i = 0; i < CHART_MAX_LENGTH; i++) {
+    const date = new Date(initialTime.getTime() - (CHART_MAX_LENGTH - 1 - i) * 2000); // 이전 시간 계산
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    initialLabels.push(`${hours}'${minutes}'${seconds}`);
+    initialData.push(35); // 초기값 35로 통일
+  }
+  liveChartLabels.value = initialLabels;
+  liveChartData.value = initialData;
+
+  fetchMobiusData(); // 초기 데이터 로드
+
+  // 타이머 설정
+  mobiusTimer = setInterval(fetchMobiusData, 2000);
+  chartTimer = setInterval(updateLiveChart, 2000);
+  nowTimer = setInterval(() => now.value = new Date(), 1000);
+  watchdogTimer = setInterval(() => {
+    if (activeEventGroup.value && (new Date().getTime() - activeEventGroup.value.lastTime.getTime() > 5000)) {
+      finalizeActiveGroup();
+    }
+  }, 5000);
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+
+onUnmounted(() => { 
+  clearInterval(mobiusTimer);
+  clearInterval(watchdogTimer);
+  clearInterval(nowTimer);
+  clearInterval(chartTimer);
+})
 </script>
 
 <style>
