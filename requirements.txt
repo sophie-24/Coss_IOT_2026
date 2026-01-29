@@ -1,0 +1,10 @@
+fastapi
+pydantic
+numpy
+tensorflow
+librosa
+requests
+uvicorn # For running the FastAPI server
+reportlab # For PDF generation
+matplotlib # For chart generation in PDF
+joblib # For saving/loading scikit-learn objects
