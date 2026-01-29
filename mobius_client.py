@@ -53,43 +53,43 @@ def create_content_instance(data: dict, labels: List[str] = None):
         logger.exception(f"Request Exception creating ContentInstance at {target_url}: {err}")
         return None
 
+
 def retrieve_latest_content_instance():
     """
     Retrieves the latest ContentInstance (cin) from the specified oneM2M Container on Mobius.
-
-    Returns:
-        dict: The content of the latest cin as a dictionary, or None if an error occurs.
     """
-    # To get the latest content instance, append '/latest' to the container URL
-    target_url = f"{MOBIUS_URL}/{CSE_NAME}/{AE_NAME}/{CONTAINER_NAME}/latest"
+    # --- 여기서부터 모든 줄 앞에 '한 탭(또는 공백 4칸)'이 있어야 합니다! ---
+    target_url = f"{MOBIUS_URL}/{CSE_NAME}/{AE_NAME}/{CONTAINER_NAME}/la"
     
-    # Headers for retrieving resource (ty not needed)
     headers = MOBIUS_HEADERS.copy()
-    headers.pop("Content-Type") # No content type needed for GET requests
+    if "Content-Type" in headers:
+        headers.pop("Content-Type")
 
     try:
         response = requests.get(target_url, headers=headers)
         response.raise_for_status()
         
-        # Parse the oneM2M response to get the content
         response_json = response.json()
-        
-        # The actual data is in m2m:cin.con
-        # It's stored as a JSON string, so we need to parse it again
         content_instance = response_json["m2m:cin"]["con"]
+        
         logger.info(f"Successfully retrieved latest ContentInstance from {target_url}.")
+        
+        # con이 이미 dict이면 그대로 리턴, 문자열이면 JSON 파싱 후 리턴
+        if isinstance(content_instance, dict):
+            return content_instance
+        
         return json.loads(content_instance)
+    
     except requests.exceptions.HTTPError as err:
-        logger.error(f"HTTP Error retrieving latest ContentInstance from {target_url}: {err}")
-        logger.error(f"Response content: {err.response.text}")
+        logger.error(f"HTTP Error: {err}")
         return None
-    except requests.exceptions.RequestException as err:
-        logger.exception(f"Request Exception retrieving latest ContentInstance from {target_url}: {err}")
+    except (KeyError, json.JSONDecodeError) as err:
+        logger.error(f"Parsing Error: {err}")
         return None
-    except KeyError as err:
-        logger.error(f"KeyError: Could not parse Mobius response for content from {target_url}: {err}")
+    except Exception as err:
+        logger.error(f"Unexpected Error: {err}")
         return None
-
+    
 def retrieve_all_content_instances(limit: int = None):
     """
     Retrieves all ContentInstances (cin) from the specified oneM2M Container on Mobius.

@@ -3,17 +3,46 @@ import logging
 import json
 import time
 import os
+import asyncio
+import requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 # Import Mobius client and configuration
-from mobius_client import create_content_instance, retrieve_all_content_instances
+from mobius_client import create_content_instance, retrieve_all_content_instances, retrieve_latest_content_instance
 from config import AE_NAME
 
 # Import AI model functions
 from ai_engine import load_ai_model_v2, preprocess_audio_for_v2, predict_noise_v2
+
+MOBIUS_URL = "https://onem2m.iotcoss.ac.kr/Mobius/ae_Namsan/cnt_noise/la"
+HEADERS = {
+    "Accept": "application/json",
+    "X-M2M-RI": "12345",
+    "X-M2M-Origin": "AWAYXoieop5ncAjTh90YfkHk9eH8Z7Vb",
+    "X-API-KEY": "AWAYXoieop5ncAjTh90YfkHk9eH8Z7Vb",
+    "x-auth-custom-lecture": "LCT_20250007",
+    "x-auth-custom-creator": "dgunamsan"
+}
+
+def get_realtime_noise():
+    response = requests.get(MOBIUS_URL, headers=HEADERS)
+    if response.status_code == 200:
+        res = response.json()
+        
+        # 'con' 필드가 문자열이 아닌 딕셔너리(JSON) 형태로 들어있을 겁니다.
+        # Mobius 서버 설정에 따라 문자열일 수도 있으니 json.loads()가 필요할 수도 있어요.
+        content = res['m2m:cin']['con']
+        
+        # 우리가 대시보드에 뿌려줄 데이터 추출
+        result = content['analysis']['result']   # "Footstep"
+        db = content['analysis']['db_level']     # 75.2
+        severity = content['analysis']['severity'] # "Red"
+        
+        return {"result": result, "db": db, "severity": severity}
+    return None
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -334,7 +363,29 @@ async def handle_mobius_notification(notification: MobiusNotification):
     return {"status": "success", "message": "Notification processed with V2 logic."}
 
 
-
+@app.get("/get_latest_noise_data")
+async def get_latest_noise_data():
+    logger.info("Proxy endpoint /get_latest_noise_data called by frontend.")
+    
+    # 1. mobius_client에서 데이터를 가져옴
+    content = retrieve_latest_content_instance()
+    
+    # 2. [핵심] 가져온 데이터가 있는지, 그리고 내용이 있는지 확인
+    if content:
+        # 터미널에 실제 나가는 데이터 모양을 찍어봅니다 (디버깅용)
+        print(f"DEBUG - 프론트엔드로 보낼 데이터: {content}")
+        return content
+    
+    # 3. 데이터가 없을 경우 에러 대신 '준비 중' 상태를 보냅니다.
+    logger.warning("가져온 데이터가 비어있습니다.")
+    return {
+        "analysis": {
+            "result": "연결 확인됨",
+            "db_level": 0,
+            "severity": "Green",
+            "note": "데이터 수신 대기 중..."
+        }
+    }
 @app.get("/logs")
 async def get_logs(limit: int = None):
     try:
@@ -492,3 +543,24 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in active_websocket_connections:
             active_websocket_connections.remove(websocket)
         logger.exception(f"Unhandled error in WebSocket connection for client {websocket.client}.")
+
+@app.websocket("/ws/noise")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            # 1. 학교 서버에서 최신 데이터 가져오기
+            response = requests.get(MOBIUS_URL, headers=HEADERS)
+            if response.status_code == 200:
+                content = response.json()['m2m:cin']['con']
+                
+                # 2. 대시보드로 실시간 전송
+                await websocket.send_json({
+                    "type": content['analysis']['result'],    # Footstep
+                    "db": content['analysis']['db_level'],     # 75.2
+                    "severity": content['analysis']['severity'] # Red
+                })
+            
+            await asyncio.sleep(2)  # 2초마다 업데이트
+    except Exception as e:
+        print(f"연결 종료: {e}")
