@@ -11,11 +11,28 @@
           <p class="text-[#4E5968] font-medium text-sm">{{ unitName }} · 실시간 소음 관제 및 증거 수집</p>
         </div>
 
-        <!-- Real-time Clock Component -->
-        <div class="hidden md:flex items-center justify-center bg-white border border-gray-200 px-5 py-2 rounded-xl shadow-sm">
-          <div class="flex flex-col items-center">
-            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Current Time</span>
-            <span class="text-lg font-mono font-bold text-[#333D4B] leading-none">{{ currentClockTime }}</span>
+        <div class="flex items-center gap-3">
+          <!-- Day/Night Status Component -->
+          <div class="hidden md:flex items-center justify-center bg-white border border-gray-200 px-5 py-2 rounded-xl shadow-sm">
+            <div class="flex flex-col items-center">
+              <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Time Status</span>
+              <div class="flex items-center gap-1.5">
+                <span :class="isDaytime ? 'text-amber-500' : 'text-indigo-600'" class="text-lg font-sans font-black">
+                  {{ isDaytime ? '주간' : '야간' }}
+                </span>
+                <span class="text-[10px] font-bold text-gray-300">
+                  ({{ isDaytime ? '06-22' : '22-06' }})
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Real-time Clock Component -->
+          <div class="hidden md:flex items-center justify-center bg-white border border-gray-200 px-5 py-2 rounded-xl shadow-sm">
+            <div class="flex flex-col items-center">
+              <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Current Time</span>
+              <span class="text-lg font-sans font-bold text-[#333D4B] leading-none">{{ currentClockTime }}</span>
+            </div>
           </div>
         </div>
         
@@ -42,50 +59,63 @@
             </div>
           </div>
           <div class="h-[300px] w-full">
-            <Line :data="chartData" :options="chartOptions" />
+            <Line :data="chartData" :options="chartOptions" :plugins="[dataValueLabelPlugin]" />
           </div>
         </div>
 
         <!-- Vibration Chart (New) -->
         <div class="bg-white rounded-[24px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50">
           <div class="flex items-center justify-between mb-6 px-2">
-            <h3 class="font-bold text-lg text-[#191F28]">실시간 진동 변화 추이 (Magnitude)</h3>
+            <h3 class="font-bold text-lg text-[#191F28]">실시간 진동 변화 추이 (m/s^2)</h3>
             <div class="flex items-center gap-2">
               <span :class="isLoading ? 'bg-amber-400 animate-pulse' : 'bg-purple-500'" class="h-2 w-2 rounded-full"></span>
               <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Mobius Live</span>
             </div>
           </div>
           <div class="h-[300px] w-full">
-            <Line :data="vibrationChartData" :options="vibrationChartOptions" />
+            <Line :data="vibrationChartData" :options="vibrationChartOptions" :plugins="[dataValueLabelPlugin]" />
           </div>
         </div>
       </section>
 
       <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div class="lg:col-span-2 bg-white rounded-[24px] p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50 flex flex-col md:flex-row items-center gap-10">
-          <div :class="statusStyles[state.currentStatus.level].bg" class="w-40 h-40 rounded-full flex flex-col items-center justify-center transition-all duration-700 shadow-inner">
+          <div :class="statusStyles[state.currentStatus.label] ? statusStyles[state.currentStatus.label].bg : statusStyles[state.currentStatus.level].bg" class="w-40 h-40 rounded-full flex flex-col items-center justify-center transition-all duration-700 shadow-inner">
             <span class="text-xs font-bold opacity-60 mb-1">현재 상태</span>
-            <span :class="statusStyles[state.currentStatus.level].text" class="text-4xl font-black tracking-tighter">
+            <span :class="statusStyles[state.currentStatus.label] ? statusStyles[state.currentStatus.label].text : statusStyles[state.currentStatus.level].text" class="text-4xl font-black tracking-tighter">
               {{ state.currentStatus.label }}
             </span>
           </div>
           <div class="flex-1 space-y-4">
             <h2 class="text-xl font-bold text-[#191F28]">AI 층간소음 분석 결과</h2>
-            <div class="p-4 bg-gray-50 rounded-2xl border border-gray-100 italic text-sm text-[#4E5968]">
+            <div class="p-4 bg-gray-50 rounded-2xl border border-gray-100 italic text-[21px] font-bold text-[#4E5968] leading-relaxed">
               "{{ state.latestEvent.note }}"
             </div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-2 gap-4">
               <div class="bg-gray-50 p-4 rounded-2xl">
-                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Instant dB</span>
-                <span class="text-xl font-extrabold text-[#333D4B]">{{ state.currentStatus.avgDb }} dB</span>
+                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">실시간 소음</span>
+                <span class="text-xl font-extrabold text-[#333D4B]">{{ formatDb(state.currentStatus.avgDb) }} dB</span>
               </div>
               <div class="bg-gray-50 p-4 rounded-2xl">
-                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Instant Vib.</span>
+                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">실시간 진동</span>
                 <span class="text-xl font-extrabold text-[#333D4B]">{{ state.latestEvent.vibration?.toFixed(2) || 0 }}</span>
               </div>
-              <div class="bg-gray-50 p-4 rounded-2xl">
-                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Risk Index</span>
-                <span class="text-xl font-extrabold text-[#333D4B]">{{ state.currentStatus.riskScore }} %</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+              <div class="bg-blue-50/50 p-4 rounded-2xl border border-blue-100/50">
+                <span class="text-[11px] font-bold text-blue-400 block mb-1 uppercase tracking-wider">1분 평균 소음</span>
+                <div class="flex items-baseline gap-1">
+                  <span class="text-xl font-extrabold text-blue-600">{{ formatDb(state.latestEvent.avg1min || 0) }}</span>
+                  <span class="text-xs font-bold text-blue-400">dB</span>
+                </div>
+              </div>
+              <div class="bg-indigo-50/50 p-4 rounded-2xl border border-indigo-100/50">
+                <span class="text-[11px] font-bold text-indigo-400 block mb-1 uppercase tracking-wider">5분 평균 소음</span>
+                <div class="flex items-baseline gap-1">
+                  <span class="text-xl font-extrabold text-indigo-600">{{ formatDb(state.latestEvent.avg5min || 0) }}</span>
+                  <span class="text-xs font-bold text-indigo-400">dB</span>
+                </div>
               </div>
             </div>
             
@@ -114,12 +144,9 @@
               <p class="text-sm text-blue-500 font-bold">{{ state.latestEvent.location }}</p>
             </div>
             <div class="pt-4 border-t border-gray-50">
-              <div class="flex justify-between text-xs mb-1 font-bold">
-                <span class="text-gray-400 tracking-tighter uppercase">Probability</span>
-                <span class="text-[#333D4B]">{{ state.latestEvent.probability }}%</span>
-              </div>
-              <div class="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden">
-                <div class="bg-blue-500 h-full transition-all duration-1000" :style="{ width: state.latestEvent.probability + '%' }"></div>
+              <div class="flex justify-between items-center py-2">
+                <span class="text-[20px] font-black text-gray-500 uppercase tracking-tight">AI 모델 확신도</span>
+                <span class="text-[32px] font-black text-blue-600">약 {{ formatProbability(state.latestEvent.probability) }}%</span>
               </div>
             </div>
           </div>
@@ -134,13 +161,16 @@
         <div class="overflow-x-auto">
           <table class="w-full text-left">
             <thead>
-              <tr class="text-[11px] font-bold text-gray-400 uppercase tracking-widest border-b border-gray-50 bg-gray-50/30">
-                <th class="px-8 py-4">최초 감지 시각</th>
-                <th class="px-8 py-4">지속 시간</th>
-                <th class="px-8 py-4">유형</th>
-                <th class="px-8 py-4 font-mono">최대 강도(dB)</th>
-                <th class="px-8 py-4 font-mono">최대 진동</th>
-                <th class="px-8 py-4 text-right">상태</th>
+              <tr class="text-[16px] font-black text-[#333D4B] uppercase tracking-widest border-b border-gray-100 bg-gray-50/50">
+                <th class="px-8 py-5">최초 감지 시각</th>
+                <th class="px-8 py-5">지속 시간</th>
+                <th class="px-8 py-5">유형</th>
+                <th class="px-8 py-5">최대 강도</th>
+                <th class="px-8 py-5 text-blue-600">1분 평균</th>
+                <th class="px-8 py-5 text-indigo-600">5분 평균</th>
+                <th class="px-8 py-5">최대 진동</th>
+                <th class="px-8 py-5">소음 정도</th>
+                <th class="px-8 py-5 text-right">상태</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-50 text-sm text-[#333D4B]">
@@ -148,16 +178,16 @@
                 <td class="px-8 py-5 text-gray-400 font-medium">{{ event.startTimeString }}</td>
                 <td class="px-8 py-5 text-gray-400 font-medium">{{ event.duration }}초</td>
                 <td class="px-8 py-5 font-bold">{{ event.type }}</td>
-                <td class="px-8 py-5 font-mono font-bold">{{ event.maxDb }}</td>
-                <td class="px-8 py-5 font-mono font-bold text-purple-600">{{ event.maxVibration?.toFixed(2) || '-' }}</td>
+                <td class="px-8 py-5 font-bold">{{ formatDb(event.maxDb) }}</td>
+                <td class="px-8 py-5 text-blue-600 font-medium">{{ formatDb(event.avg1min) }}</td>
+                <td class="px-8 py-5 text-indigo-600 font-medium">{{ formatDb(event.avg5min) }}</td>
+                <td class="px-8 py-5 font-bold text-purple-600">{{ event.maxVibration?.toFixed(2) || '-' }}</td>
+                <td class="px-8 py-5 font-bold text-rose-600">{{ event.noiseDegree }}</td>
                 <td class="px-8 py-5 text-right font-bold">
                   <span :class="statusStyles[event.level].badge" class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter">
                     {{ event.level }}
                   </span>
                 </td>
-              </tr>
-              <tr v-if="displayEvents.length === 0">
-                <td colspan="6" class="px-8 py-20 text-center text-gray-400 font-medium">Mobius 데이터를 수신 중입니다...</td>
               </tr>
             </tbody>
           </table>
@@ -188,21 +218,111 @@ interface StatusInfo { level: StatusLevel; label: string; description: string; a
 // Mobius에서 수신하는 원본 이벤트 타입
 interface NoiseEvent {
   id: number; time: string; type: string; db: number; probability: number;
+  avg1min?: number; avg5min?: number;
   level: StatusLevel; location: string; note: string; lastUpdatedAt: Date;
-  vibration?: number; // New: Vibration Magnitude
+  vibration?: number; isExternal?: boolean;
 }
 // 히스토리 테이블에 표시될 그룹화된 이벤트 타입
 interface EventGroup {
   id: number; type: string; startTime: Date; lastTime: Date; startTimeString: string;
-  duration: number; maxDb: number; maxVibration: number; level: StatusLevel; location: string;
+  duration: number; maxDb: number; avg1min: number; avg5min: number; maxVibration: number; level: StatusLevel; location: string;
+  noiseDegree?: string;
 }
 
+// [추가] 소음 정도 판정 함수
+const getNoiseDegree = (avg1min: number, avg5min: number, time: Date) => {
+  const hour = time.getHours();
+  const isNight = hour >= 22 || hour < 6;
+  const degrees = [];
+
+  if (isNight) {
+    if (avg1min > 35) degrees.push('수인한도 초과');
+    else if (avg1min > 34) degrees.push('문제 소음');
+    if (avg5min > 40) degrees.push('층간 소음');
+  } else {
+    if (avg1min > 40) degrees.push('수인한도 초과');
+    else if (avg1min > 39) degrees.push('문제 소음');
+    if (avg5min > 45) degrees.push('층간 소음');
+  }
+
+  return degrees.length > 0 ? degrees.join(', ') : '정상';
+};
+
 // --- 2. 스타일 및 상수 ---
-const statusStyles: Record<StatusLevel, StatusStyle> = {
+const statusStyles: Record<string, StatusStyle> = {
   safe: { bg: 'bg-emerald-50 shadow-[inset_0_2px_10px_rgba(16,185,129,0.1)]', text: 'text-emerald-500', badge: 'bg-emerald-100 text-emerald-600' },
   warning: { bg: 'bg-amber-50 shadow-[inset_0_2px_10px_rgba(245,158,11,0.1)]', text: 'text-amber-500', badge: 'bg-amber-100 text-amber-600' },
-  danger: { bg: 'bg-rose-50 shadow-[inset_0_2px_10px_rgba(244,63,94,0.1)]', text: 'text-rose-500', badge: 'bg-rose-100 text-rose-600' }
+  danger: { bg: 'bg-rose-50 shadow-[inset_0_2px_10px_rgba(244,63,94,0.1)]', text: 'text-rose-500', badge: 'bg-rose-100 text-rose-600' },
+  '외부 소음': { bg: 'bg-gray-100 shadow-[inset_0_2px_10px_rgba(0,0,0,0.05)]', text: 'text-gray-500', badge: 'bg-gray-200 text-gray-600' }
 }
+
+// Chart.js Custom Plugin to draw values on points
+const dataValueLabelPlugin = {
+  id: 'dataValueLabel',
+  afterDatasetsDraw(chart: any) {
+    const { ctx, data } = chart;
+    ctx.save();
+    data.datasets.forEach((dataset: any, i: number) => {
+      const meta = chart.getDatasetMeta(i);
+      meta.data.forEach((element: any, index: number) => {
+        const dataValue = dataset.data[index];
+        // 0.00인 경우 표기가 잘리거나 불필요하므로 제외 (0.01 이상만 표기)
+        if (typeof dataValue !== 'undefined' && dataValue !== null && dataValue >= 0.01) {
+          ctx.fillStyle = dataset.borderColor;
+          ctx.font = 'bold 10px Pretendard';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          const position = element.tooltipPosition();
+          // 값 표시 (소수점 1자리)
+          // 진동 차트(i=0이 소음, i=0이 진동 - 현재 Line 컴포넌트 각각 호출됨)
+          // dataset label로 구분하여 단위 추가
+          const unit = dataset.label === 'Magnitude' ? ' m/s²' : '';
+          ctx.fillText(dataValue.toFixed(2) + unit, position.x, position.y - 8);
+        }
+      });
+    });
+    ctx.restore();
+  }
+};
+
+// [추가] dB 포맷팅 함수 (소수점 둘째자리에서 올림)
+const formatDb = (val: number) => {
+  if (!val) return '약 0.00';
+  return '약 ' + (Math.ceil(val * 100) / 100).toFixed(2);
+}
+
+// [추가] Probability 포맷팅 함수
+const formatProbability = (val: number) => {
+  if (!val) return '0.00';
+  return (Math.ceil(val * 100) / 100).toFixed(2);
+}
+
+// [추가] AI 결과 한글 매핑
+const labelMap: Record<string, string> = {
+  'footsteps': '발망치 소음',
+  'impact_noise': '충격 소음',
+  'door_wood_knock': '노크 소음',
+  'door_wood_slam': '문 닫는 소음',
+  'voice': '대화 소음',
+  'silence': '정적',
+  'dog': '개 짖는 소리',
+  'laughing': '웃음 소리',
+  'crying_baby': '아기 울음 소리',
+  'vacuum_cleaner': '청소기 소음',
+  'thunderstorm': '천둥 소음(외부)',
+  'car_horn': '경적 소음(외부)',
+  'siren': '사이렌 소음(외부)',
+  'music': '음악 소음'
+};
+
+const translateLabel = (label: string) => {
+  const lower = label.toLowerCase();
+  for (const key in labelMap) {
+    if (lower.includes(key)) return labelMap[key];
+  }
+  return label; // 매핑 없으면 원래 이름 표시
+};
+
 const buildingName = '동국대학교 D-Log'
 const unitName = '3140호'
 const CHART_MAX_LENGTH = 15; // 점 사이 간격을 2배로 넓히기 위해 표시 개수 축소 (30 -> 15)
@@ -230,11 +350,17 @@ const state = reactive<{
 
 const activeEventGroup = ref<EventGroup | null>(null); // 현재 진행중인 이벤트 그룹
 const now = ref(new Date()); // 지속시간 계산을 위한 실시간 시간
+
+const isDaytime = computed(() => {
+  const hour = now.value.getHours();
+  return hour >= 6 && hour < 22;
+});
+
 const currentClockTime = ref(''); // Header Clock
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 let alertAudio: HTMLAudioElement | null = null;
-let watchdogTimer: any, nowTimer: any, chartTimer: any, clockTimer: any; // Added clockTimer
+let watchdogTimer: any, nowTimer: any, chartTimer: any, clockTimer: any, reconnectTimer: any; // Corrected declarations
 
 // 실시간 차트 전용 데이터
 const liveChartLabels = ref<string[]>([]);
@@ -248,11 +374,13 @@ const API_BASE_URL = 'http://localhost:8080';
 const fetchInitialLogs = async () => {
   isLoading.value = true;
   try {
-    const res = await axios.get(`${API_BASE_URL}/logs?limit=10`);
+    const res = await axios.get(`${API_BASE_URL}/logs?limit=100`);
     if (res.data && res.data.logs) {
       // 초기 로그는 역순으로 처리하여 시간 순서를 맞춥니다.
       const reversedLogs = res.data.logs.reverse();
       reversedLogs.forEach(processUpdate);
+      // 모든 초기 로그 처리가 끝난 후, 현재 진행 중인 그룹이 있다면 강제로 완료 처리하여 히스토리에 고정합니다.
+      finalizeActiveGroup();
       error.value = null;
     }
   } catch (err: any) {
@@ -279,11 +407,11 @@ const levelToNumber = (level: StatusLevel): number => {
 // 진행중인 이벤트를 완료하고 히스토리에 추가
 const finalizeActiveGroup = () => {
   if (activeEventGroup.value) {
+    // 종료된 시점의 최종 지속 시간을 계산합니다.
     activeEventGroup.value.duration = Math.round((activeEventGroup.value.lastTime.getTime() - activeEventGroup.value.startTime.getTime()) / 1000);
-    if (activeEventGroup.value.duration >= 2) {
-      state.recentEvents.unshift({ ...activeEventGroup.value });
-      if (state.recentEvents.length > 10) state.recentEvents.pop();
-    }
+    
+    // 모든 이벤트를 지속 시간과 상관없이 히스토리에 추가하여 데이터 유실을 방지합니다.
+    state.recentEvents.unshift({ ...activeEventGroup.value });
   }
   activeEventGroup.value = null;
 }
@@ -304,29 +432,46 @@ const processUpdate = (data: any) => {
 
   const eventTime = new Date();
   
-  const note = `AI 분석 완료: ${analysis.result} (${(analysis.probability * 100).toFixed(1)}%)`;
+  const translatedResult = translateLabel(analysis.result || '소음 감지');
+  const formattedProb = (Math.ceil((analysis.probability ?? 0) * 10000) / 100).toFixed(2);
+  
+  let note = `AI 분석 완료: ${translatedResult} (약 ${formattedProb}%)`;
+  if (analysis.is_external) {
+    note = `⚠️ 외부 소음 감지 (무시됨): ${translatedResult}`;
+  }
 
   const newEvent: NoiseEvent = {
     id: eventTime.getTime(),
     time: eventTime.toLocaleTimeString('ko-KR', { hour12: false }),
-    type: analysis.result || '소음 감지',
+    type: translatedResult,
     db: analysis.db_level ?? 0,
+    avg1min: analysis.avg_1min ?? 0,
+    avg5min: analysis.avg_5min ?? 0,
     probability: (analysis.probability ?? 0) * 100,
     level: severityToLevel(analysis.severity),
     location: data.house_id || '측정 구역',
     note: note,
     lastUpdatedAt: eventTime,
-    vibration: analysis.vibration_max ?? 0, // Read vibration_max
+    vibration: analysis.vibration_max ?? 0, 
+    isExternal: !!analysis.is_external
   };
 
   state.latestEvent = newEvent;
   state.currentStatus = {
     level: newEvent.level,
-    label: newEvent.level === 'safe' ? '안전' : (newEvent.level === 'warning' ? '주의' : '위험'),
-    description: `${newEvent.type} 감지 - ${newEvent.note}`,
+    label: newEvent.isExternal ? '외부 소음' : (newEvent.level === 'safe' ? '안전' : (newEvent.level === 'warning' ? '주의' : '위험')),
+    description: newEvent.note,
     avgDb: newEvent.db,
-    riskScore: newEvent.level === 'safe' ? 10 : (newEvent.level === 'warning' ? 45 : 95)
+    riskScore: newEvent.db < 39 ? 10 : (newEvent.db <= 57 ? 50 : 95)
   };
+
+  // [핵심] 중재 메시지 상태 업데이트 (Red/Yellow 시 '발송됨' 표시)
+  state.mediationSentStatus = !!data.action?.mediation_sent;
+  if (state.mediationSentStatus) {
+    state.mediationSentTime = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  } else {
+    state.mediationSentTime = null;
+  }
   
   if (newEvent.level === 'danger') {
     if (!alertAudio) alertAudio = new Audio('/sounds/alert.wav');
@@ -337,11 +482,16 @@ const processUpdate = (data: any) => {
   if (!activeEventGroup.value) {
     activeEventGroup.value = {
       id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
-      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, 
+      avg1min: newEvent.avg1min || 0, avg5min: newEvent.avg5min || 0,
+      maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location,
+      noiseDegree: getNoiseDegree(newEvent.avg1min || 0, newEvent.avg5min || 0, eventTime)
     };
   } else if (activeEventGroup.value.type === newEvent.type && (eventTime.getTime() - activeEventGroup.value.lastTime.getTime()) < 10000) {
     activeEventGroup.value.lastTime = eventTime;
     if (newEvent.db > activeEventGroup.value.maxDb) activeEventGroup.value.maxDb = newEvent.db;
+    // 1분/5분 평균 및 소음 정도는 '최초 감지 시점' 값을 유지하거나, 필요시 업데이트 
+    // 유저 요청에 따라 '최초 감지 시각으로부터의' 값을 유지하도록 함 (업데이트 안 함)
     const currentVib = newEvent.vibration || 0;
     if (currentVib > activeEventGroup.value.maxVibration) activeEventGroup.value.maxVibration = currentVib;
     if (levelToNumber(newEvent.level) > levelToNumber(activeEventGroup.value.level)) activeEventGroup.value.level = newEvent.level;
@@ -349,16 +499,24 @@ const processUpdate = (data: any) => {
     finalizeActiveGroup();
     activeEventGroup.value = {
       id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
-      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, 
+      avg1min: newEvent.avg1min || 0, avg5min: newEvent.avg5min || 0,
+      maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location,
+      noiseDegree: getNoiseDegree(newEvent.avg1min || 0, newEvent.avg5min || 0, eventTime)
     };
   }
 };
 
-// 사과 이벤트 처리 함수
+// 사과 이벤트 처리 함수 (실시간 병렬 수신 대응)
 const handleApologyEvent = (data: any) => {
   state.apologySentStatus = true;
-  state.apologySentTime = new Date(data.timestamp).toLocaleString('ko-KR');
-  console.log("Apology message received and processed!", data);
+  // 시간 포맷팅 (초 단위까지 표시하여 정확한 시각 알림)
+  const receivedTime = new Date(data.timestamp);
+  state.apologySentTime = receivedTime.toLocaleTimeString('ko-KR', { hour12: false });
+  
+  console.log(`[REAL-TIME] 사과 메시지 수신 확인: ${state.apologySentTime}`);
+  
+  // 사용자에게 시각적으로 알림 (필요시 알림음 추가 가능)
 }
 
 // --- WebSocket 연결 로직 ---
@@ -366,7 +524,35 @@ let socket: WebSocket | null = null;
 
 const setupWebSocket = () => {
   // Use explicit localhost:8080 because dev server (5173) != backend (8080)
-  const wsUrl = 'ws://localhost:8080/ws';
+  // [Modified] Support both Localhost and Ngrok/Remote
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let wsUrl = `${protocol}//localhost:8080/ws`; // Default local
+  
+  // If running on ngrok or remote IP (not localhost/127.0.0.1)
+  if (!window.location.hostname.includes('localhost') && !window.location.hostname.includes('127.0.0.1')) {
+     // Assume backend is on the same host/port if served together, 
+     // OR if separated, user needs to config. 
+     // But typically with ngrok, frontend/backend might be on different tunnels OR same machine.
+     // If user accesses Frontend via ngrok, they probably need Backend via ngrok too.
+     // The provided AI_SERVER_URL in config.py is the backend URL.
+     // We can try to use the current host but port 8080 might be blocked or different.
+     // Safer bet: If on ngrok, assume backend is same domain (if proxied) OR ask user.
+     // For now, let's keep localhost:8080 for local dev, but allow override?
+     // Actually, mixed content (https frontend, ws backend) will fail.
+     // If user visits https://xyz.ngrok-free.app, they need wss://xyz.ngrok-free.app/ws.
+     wsUrl = `${protocol}//${window.location.host}/ws`; 
+     // Note: This assumes the Frontend server proxies /ws to Backend 8080, 
+     // OR Backend is serving the Frontend. 
+     // If they are separate (Vite 5173, Uvicorn 8080), this fails remotely.
+     // But typically production setups assume integration.
+     // For safety in this specific "Separate Dev Server" setup:
+     // If remote, we can't easily guess the backend URL without config.
+     // Let's stick to localhost:8080 for now as the user seems to be testing locally.
+     // Reverting to the HARDCODED localhost:8080 which is safer for this specific user env.
+  }
+  
+  // Force localhost:8080 as requested by user environment
+  wsUrl = 'ws://localhost:8080/ws';
   
   socket = new WebSocket(wsUrl);
 
@@ -445,13 +631,16 @@ const vibrationChartData = computed(() => ({
 const chartOptions = {
   responsive: true,
   maintainAspectRatio: false,
-  plugins: { legend: { display: false }, tooltip: { enabled: true } },
+  plugins: { 
+    legend: { display: false }, 
+    tooltip: { enabled: true },
+  },
   scales: { 
     y: { 
       min: 0, 
-      max: 60, 
+      max: 80, 
       ticks: {
-        stepSize: 5,
+        stepSize: 10,
         color: '#6B7280',
         font: { size: 10 }
       },
@@ -478,7 +667,7 @@ const vibrationChartOptions = {
   scales: { 
     y: { 
       min: 0, 
-      max: 2.0, 
+      max: 1.4, 
       ticks: {
         stepSize: 0.2,
         color: '#6B7280',
