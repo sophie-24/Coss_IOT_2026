@@ -11,16 +11,27 @@ CSE_NAME = "Mobius"
 # The name of your Application Entity (AE) as created on the Mobius platform
 AE_NAME = "ae_Namsan"
 
-# The name of the Container to store the noise event data, created under your AE
-CONTAINER_NAME = "cnt_noise"
+# --- Container Names ---
+# 1. INPUT: Arduino posts Raw Data (Vibration/Sound JSON) here
+CNT_RAW = "cnt_raw_sensor" 
 
-# The name of the Container where Arduinos will post the RAW sensor data
-RAW_DATA_CONTAINER_NAME = "cnt_raw" # Placeholder name
+# 2. OUTPUT 1: AI posts Noise Level/Grade (Green, Yellow, Red) here for Arduino/Web
+CNT_STATUS = "cnt_status"
+
+# 3. OUTPUT 2: AI posts Noise Type (Footstep, Furniture, etc.) here for Arduino/Web
+CNT_NOISE = "cnt_noise"
+
+# 4. INPUT: Apology acknowledgements
+CNT_APOLOGY = "cnt_apology"
+
+# Backward compatibility aliases (for existing code)
+RAW_DATA_CONTAINER_NAME = CNT_RAW
+CONTAINER_NAME = CNT_NOISE # Default output container for now
+APOLOGY_CONTAINER_NAME = CNT_APOLOGY
 
 # The publicly accessible URL of this AI server for Mobius to send notifications to.
 # Replace 'YOUR_SERVER_IP' with the actual public or local IP address of the machine running this server.
-AI_SERVER_URL = "http://192.168.0.115:8080"
-
+AI_SERVER_URL = "https://8ce841b24568.ngrok-free.app"
 
 # AI Model Configuration
 # ----------------------
@@ -33,3 +44,15 @@ DEFAULT_SAMPLING_RATE = 22050
 
 # Number of MFCCs to extract for audio features
 MFCC_COUNT = 20
+
+# Network Configuration
+# ---------------------
+# Timeout for network requests (seconds)
+REQUEST_TIMEOUT = 10
+
+# MOCK DATA MODE Configuration
+# -----------------------------
+# Set to True to enable mock data generation for frontend development
+# when the Mobius server is unavailable.
+# Set to False to use actual Mobius notifications.
+MOCK_DATA_MODE = False

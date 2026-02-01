@@ -13,7 +13,7 @@ YAMNET_SR = 16000
 YAMNET_MONO = True
 
 # V2 model input specifications
-MAX_STEPS = 5
+MAX_STEPS = 20
 EMBEDDING_SIZE = 1024
 
 # --- Logging ---
@@ -33,74 +33,136 @@ def load_ai_model_v2(
     """
     global _model_v2, _class_names_v2, _yamnet_model
     
-    # Return True if all models are already loaded
-    if all([_model_v2, _class_names_v2, _yamnet_model]):
+    if all([_model_v2 is not None, _class_names_v2 is not None, _yamnet_model is not None]):
         return True
 
     try:
         logger.info("Loading AI model V2, class names, and YAMNet model...")
-        _model_v2 = tf.keras.models.load_model(model_path)
-        _class_names_v2 = np.load(class_names_path, allow_pickle=True)
+        
+        # Load custom trained V2 model
+        if os.path.exists(model_path):
+            _model_v2 = tf.keras.models.load_model(model_path)
+        else:
+            logger.error(f"Model file not found at {model_path}")
+            return False
+            
+        # Load class names
+        if os.path.exists(class_names_path):
+            _class_names_v2 = np.load(class_names_path, allow_pickle=True)
+        else:
+            logger.error(f"Class names file not found at {class_names_path}")
+            return False
+            
+        # Load YAMNet from TFHub
         _yamnet_model = hub.load(YAMNET_MODEL_HANDLE)
+        
         logger.info("✅ Successfully loaded all V2 model assets.")
         return True
     except Exception as e:
-        logger.exception(f"❌ Critical error loading V2 model assets from {model_path} or {class_names_path}.")
-        _model_v2, _class_names_v2, _yamnet_model = None, None, None # Ensure clean state on failure
+        logger.exception(f"❌ Critical error loading V2 model assets: {e}")
+        _model_v2, _class_names_v2, _yamnet_model = None, None, None
         return False
-
 def preprocess_audio_for_v2(audio_data: np.ndarray, sr: int) -> np.ndarray:
     """
-    Preprocesses raw audio data for the V2 model by extracting YAMNet embeddings.
-    The process:
-    1. Resamples the audio to the required 16kHz for YAMNet.
-    2. Extracts embeddings using YAMNet.
-    3. Pads or slices the embeddings to a fixed sequence length (MAX_STEPS).
-    4. Reshapes the data to match the model's input: (1, MAX_STEPS, 1024).
+    Preprocesses audio data: Resample to 16kHz -> YAMNet -> Embeddings -> Pad/Crop
+    Returns: (1, MAX_STEPS, 1024) tensor or None on failure.
     """
     if _yamnet_model is None:
-        logger.error("YAMNet model is not loaded. Cannot preprocess audio.")
+        logger.error("YAMNet model is not loaded.")
         return None
 
-    # 1. Resample audio if necessary
-    if sr != YAMNET_SR:
-        audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=YAMNET_SR)
-    
-    # 2. Get embeddings from YAMNet
-    # The model returns: scores, embeddings, and spectrogram
-    _, embeddings, _ = _yamnet_model(audio_data)
-    
-    # 3. Pad or slice the embeddings to the fixed sequence length
-    num_embeddings = embeddings.shape[0]
-    
-    if num_embeddings > MAX_STEPS:
-        # If more embeddings than needed, take the last MAX_STEPS
-        processed_embeddings = embeddings[-MAX_STEPS:, :]
-    else:
-        # If fewer, pad with zeros at the beginning
-        pad_width = MAX_STEPS - num_embeddings
-        processed_embeddings = np.pad(embeddings, ((pad_width, 0), (0, 0)), mode='constant')
+    try:
+        # 1. Resample to 16000 Hz if necessary
+        if sr != YAMNET_SR:
+            resampled_audio = librosa.resample(audio_data, orig_sr=sr, target_sr=YAMNET_SR)
+        else:
+            resampled_audio = audio_data
 
-    # 4. Reshape for the model input: (1, time_steps, features)
-    return processed_embeddings.reshape(1, MAX_STEPS, EMBEDDING_SIZE)
+        # [핵심 수정] 2. YAMNet 모델은 무조건 1차원 데이터만 받습니다. 
+        # 혹시 모를 차원을 완전히 펴서(flatten) 전달합니다.
+        waveform = tf.convert_to_tensor(resampled_audio, dtype=tf.float32)
+        waveform = tf.reshape(waveform, [-1]) # [None] 형태로 강제 변환
 
+        # scores, embeddings, spectrogram = model(waveform)
+        _, embeddings, _ = _yamnet_model(waveform)
+        
+        # embeddings shape: (N, 1024)
+        embeddings_np = embeddings.numpy()
+        
+        # 3. Pad or Truncate to MAX_STEPS (5 steps)
+        current_steps = embeddings_np.shape[0]
+        
+        if current_steps < MAX_STEPS:
+            padding = np.zeros((MAX_STEPS - current_steps, EMBEDDING_SIZE))
+            processed_embeddings = np.vstack([embeddings_np, padding]) if current_steps > 0 else padding
+        else:
+            processed_embeddings = embeddings_np[:MAX_STEPS, :]
+            
+        # 4. Add Batch Dimension: (1, 5, 1024)
+        return np.expand_dims(processed_embeddings, axis=0)
 
-def predict_noise_v2(processed_audio: np.ndarray) -> Tuple[str, float]:
+    except Exception as e:
+        # 이 로그가 찍혔던 이유를 잡았습니다!
+        logger.error(f"Error in audio preprocessing: {e}")
+        return None
+
+def predict_noise_v2(audio_data: np.ndarray, sr: int, vibration_z: list) -> Tuple[str, float]:
     """
-    Performs inference using the loaded V2 model.
+    Performs inference using the Multi-modal V2 model (Audio + Vibration).
+    
+    Args:
+        audio_data: Raw audio samples (float32)
+        sr: Sampling rate of audio
+        vibration_z: List of Z-axis acceleration values
+        
+    Returns:
+        (Predicted Class Name, Probability)
     """
-    if _model_v2 is None or _class_names_v2 is None:
-        logger.error("V2 model or class names not loaded. Cannot perform prediction.")
-        return "ERROR", 0.0
+    if _model_v2 is None:
+        logger.error("V2 Model is not loaded.")
+        return "Error", 0.0
 
-    # Get model prediction
-    prediction = _model_v2.predict(processed_audio)
-    
-    # Get the class with the highest probability
-    predicted_class_index = np.argmax(prediction[0])
-    predicted_class_name = _class_names_v2[predicted_class_index]
-    predicted_probability = float(np.max(prediction[0]))
-    
-    logger.info(f"V2 Model Prediction: '{predicted_class_name}' with {predicted_probability:.2f} confidence.")
-    
-    return predicted_class_name, predicted_probability
+    # 1. Process Audio
+    audio_input = preprocess_audio_for_v2(audio_data, sr)
+    if audio_input is None:
+        return "Error", 0.0
+
+    # 2. Process Vibration
+    # Calculate statistical features: Mean, Std, Max, RMS
+    try:
+        vibe_np = np.array(vibration_z)
+        
+        if vibe_np.size == 0:
+            # Handle empty vibration data gracefully (e.g., zeros)
+            vibe_features = np.zeros((1, 4))
+        else:
+            mean_val = np.mean(vibe_np)
+            std_val = np.std(vibe_np)
+            max_val = np.max(vibe_np)
+            rms_val = np.sqrt(np.mean(vibe_np**2))
+            
+            # Shape: (1, 4)
+            vibe_features = np.array([[mean_val, std_val, max_val, rms_val]])
+    except Exception as e:
+        logger.error(f"Error processing vibration data: {e}")
+        return "Error", 0.0
+
+    # 3. Predict
+    try:
+        # Model expects a list of inputs: [audio_input, vibration_input]
+        predictions = _model_v2.predict([audio_input, vibe_features], verbose=0)
+        
+        # predictions shape: (1, num_classes)
+        predicted_index = np.argmax(predictions[0])
+        predicted_prob = float(predictions[0][predicted_index])
+        
+        if _class_names_v2 is not None:
+            result_label = _class_names_v2[predicted_index]
+        else:
+            result_label = f"Class {predicted_index}"
+            
+        return result_label, predicted_prob
+
+    except Exception as e:
+        logger.exception(f"Error during V2 inference: {e}")
+        return "Error", 0.0

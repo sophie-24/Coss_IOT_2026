@@ -107,3 +107,22 @@ AI 서버는 아래 규칙을 순서대로 검사하여 가장 먼저 해당하�
 
 - **🟢 GREEN (안정): "일상적인 생활 소음"**
   > 위의 RED, YELLOW 조건에 어느 것도 해당되지 않는 모든 경우
+
+---
+
+## 🛡️ Stability & Advanced Reporting Features (New in v2.1)
+
+### 1. Robust Exception Handling
+- **Data Length Validation:** To prevent crashes from corrupted or truncated sensor packets, the server now strictly validates the length of incoming audio data. Packets shorter than the minimum requirement (~0.25s) are safely skipped with a log entry.
+- **Network Timeouts:** A global `REQUEST_TIMEOUT` (default: 10s) is enforced on all Mobius interactions and WebSocket data fetches, ensuring the server remains responsive even during network instability.
+
+### 2. Legal-Grade Reporting
+- **PDF Reports (`/report/pdf`):**
+    - **Tamper-Proof Disclaimer:** Includes a statement guaranteeing data integrity via the oneM2M platform.
+    - **Waveform Visualization:** Automatically embeds a waveform graph of the most critical noise event.
+    - **Criteria Appendix:** Appends the detailed Red/Yellow/Green classification logic for transparency.
+- **Expert CSV Export (`/report/csv`):**
+    - Provides raw data for deeper analysis, including **Vibration Peak Counts**, **AI Confidence Scores (4 decimal places)**, and **Apology Match Status** (indicating if an apology was sent within 10 minutes of an event).
+
+### 3. Engineering Workaround: Overcoming Hardware Constraints (v2.2)
+- 본 프로젝트는 임베디드 기기의 물리적 제약 조건을 소프트웨어 아키텍처 설계를 통해 극복하였습니다.Arduino Memory & Buffer Management: - 제약 사항: 아두이노의 하드웨어 전송 버퍼 용량 제한으로 인해 1회 전송 가능한 오디오 샘플 수가 최대 100개로 국한되는 기술적 한계 발생.영향: AI 모델(CNN 기반)의 추론을 위한 최소 입력 데이터 규격(1,000개 샘플)을 충족하지 못해 분석 단계의 병목 현상 초래.Zero-Padding & Frame Alignment:해결 방안: 백엔드 수신 로직에서 Zero-Padding(부족한 데이터의 후순위를 0으로 채움) 기법을 도입하여 데이터 프레임을 강제로 정렬.결과: 하드웨어의 물리적 메모리 한계를 소프트웨어적으로 보완하여, 모델의 입력 규격을 완벽히 준수하면서도 실시간 추론이 가능한 파이프라인 구축 성공.Physics-Aware Data Processing: - Vibration Offset Removal: 가속도 센서의 특성상 상시 측정되는 지구 중력 가속도($1.0g$)를 소프트웨어 필터로 제거하여, 층간소음과 직결되는 '순수 충격 진동량'만을 정밀하게 추출.

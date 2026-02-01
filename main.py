@@ -5,17 +5,23 @@ import time
 import os
 import asyncio
 import requests
+import pandas as pd
+import io
+import csv
+import codecs
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
-from pydantic import BaseModel
-from typing import List, Dict, Any
-from datetime import datetime
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta, timezone, time as dt_time
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Response, Request
 # Import Mobius client and configuration
 from mobius_client import create_content_instance, retrieve_all_content_instances, retrieve_latest_content_instance
-from config import AE_NAME
+from config import AE_NAME, MOCK_DATA_MODE, REQUEST_TIMEOUT, CNT_STATUS, CNT_NOISE, CNT_RAW, CNT_APOLOGY
 
 # Import AI model functions
-from ai_engine import load_ai_model_v2, preprocess_audio_for_v2, predict_noise_v2
+from ai_engine import load_ai_model_v2, predict_noise_v2, preprocess_audio_for_v2
 
 MOBIUS_URL = "https://onem2m.iotcoss.ac.kr/Mobius/ae_Namsan/cnt_noise/la"
 HEADERS = {
@@ -27,30 +33,11 @@ HEADERS = {
     "x-auth-custom-creator": "dgunamsan"
 }
 
-def get_realtime_noise():
-    response = requests.get(MOBIUS_URL, headers=HEADERS)
-    if response.status_code == 200:
-        res = response.json()
-        
-        # 'con' 필드가 문자열이 아닌 딕셔너리(JSON) 형태로 들어있을 겁니다.
-        # Mobius 서버 설정에 따라 문자열일 수도 있으니 json.loads()가 필요할 수도 있어요.
-        content = res['m2m:cin']['con']
-        
-        # 우리가 대시보드에 뿌려줄 데이터 추출
-        result = content['analysis']['result']   # "Footstep"
-        db = content['analysis']['db_level']     # 75.2
-        severity = content['analysis']['severity'] # "Red"
-        
-        return {"result": result, "db": db, "severity": severity}
-    return None
-
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -61,14 +48,16 @@ class HouseState(BaseModel):
     last_loud_time: datetime | None = None
     last_packet_severity: str = "Green"
     start_of_quiet: datetime | None = None
+    mediation_active: bool = False
+    mediation_sent_time: str | None = None
+    apology_active: bool = False
+    apology_sent_time: str | None = None
 
 house_states: Dict[str, HouseState] = {}
 QUIET_PERIOD_SECONDS = 5
-VIBRATION_PEAK_THRESHOLD = 0.3 # Example threshold for what constitutes a "peak"
+VIBRATION_PEAK_THRESHOLD = 0.3
 
-# --- Pydantic Models for Input, Output, and Notifications ---
-
-# --- INPUT (from Arduino via Mobius Notification)
+# --- Pydantic Models ---
 class MetaData(BaseModel):
     sampling_rate: str
     vibration_unit: str
@@ -80,23 +69,29 @@ class SensorPayload(BaseModel):
     raw_max_amplitude: int
 
 class NewPayload(BaseModel):
+    model_config = ConfigDict(extra='ignore')
     house_id: str
     timestamp: str
-    meta: MetaData
-    payload: SensorPayload
+    meta: Any
+    payload: Any 
 
-# --- OUTPUT (to Mobius cnt_noise)
 class AnalysisResult(BaseModel):
     result: str
     probability: float
     db_level: float
     severity: str
     duration: float = 0.0
-    vibration_peaks: int
+    vibration_peaks: int = 0
+    vibration_max: float = 0.0
+    audio_signature: List[float] = []
 
 class Action(BaseModel):
     mediation_sent: bool
     target: str
+
+class ApologyDetail(BaseModel):
+    sent: bool
+    timestamp: str
 
 class OneM2MPlatformOutput(BaseModel):
     event_id: str
@@ -104,463 +99,372 @@ class OneM2MPlatformOutput(BaseModel):
     timestamp: str
     analysis: AnalysisResult
     action: Action
-
-# --- oneM2M Notification Structure
-class Representation(BaseModel):
-    con: str # The stringified JSON content from the raw data container
-
-class NotificationEvent(BaseModel):
-    rep: Representation
-
-class NotificationPayload(BaseModel):
-    nev: NotificationEvent
+    apology_detail: Optional[ApologyDetail] = None
 
 class MobiusNotification(BaseModel):
-    sgn: NotificationPayload
+    m2m_sgn: Dict[str, Any] = Field(None, alias="m2m:sgn")
+    sgn: Dict[str, Any] = None
 
-# --- Global App and Model Initialization ---
+# --- Mock Data Generation ---
+async def generate_mock_output_data() -> OneM2MPlatformOutput:
+    house_id = "dgu_house_3140"
+    current_time = datetime.now()
+    results = ["Footstep", "Impact Noise", "Voice", "Silence"]
+    severities = ["Green", "Yellow", "Red"]
+    result = np.random.choice(results)
+    severity = np.random.choice(severities, p=[0.6, 0.3, 0.1])
+    db_level = round(np.random.uniform(40, 90), 2)
+    if severity == "Green": db_level = round(np.random.uniform(30, 50), 2)
+    elif severity == "Red": db_level = round(np.random.uniform(80, 100), 2)
+    probability = round(np.random.uniform(0.3, 0.99), 2)
+    mediation_sent = severity in ["Yellow", "Red"]
+    return OneM2MPlatformOutput(
+        event_id=f"MOCK_EVT_{current_time.strftime('%Y%m%d_%H%M%S_%f')}",
+        house_id=house_id, timestamp=current_time.isoformat(),
+        analysis=AnalysisResult(result=result, probability=probability, db_level=db_level, severity=severity),
+        action=Action(mediation_sent=mediation_sent, target=severity)
+    )
+
+async def mock_data_sender():
+    logger.info("MOCK DATA MODE: Starting sender.")
+    while True:
+        await asyncio.sleep(2)
+        if not active_websocket_connections: continue
+        mock_data = await generate_mock_output_data()
+        mock_dict = mock_data.dict(exclude_none=True)
+        mock_dict["is_mock_data"] = True
+        for connection in active_websocket_connections:
+            try: await connection.send_json(mock_dict)
+            except: pass
 
 app = FastAPI()
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# Load the V2 model at startup
-if not load_ai_model_v2():
-    logger.error("CRITICAL: Failed to load AI model V2 at startup. The application may not function correctly.")
+@app.on_event("startup")
+async def startup_event():
+    if MOCK_DATA_MODE: asyncio.create_task(mock_data_sender())
+    if not load_ai_model_v2(): logger.error("CRITICAL: Failed to load AI model V2.")
 
-# --- Helper Functions for Analysis ---
+# --- Helper Functions ---
 def amplitude_to_db(amplitude: int) -> float:
-    """Converts raw amplitude to a dB-like scale."""
-    if amplitude == 0:
-        return 0.0
-    # This is a simplified conversion. A calibrated microphone would be needed for true dB.
-    # We are creating a logarithmic scale where 0 maps to 0 and 32767 maps to ~96 dB.
+    if amplitude == 0: return 0.0
     return 20 * np.log10(max(1, amplitude))
 
 def analyze_vibration_peaks(vibration_z_list: np.ndarray, threshold: float = VIBRATION_PEAK_THRESHOLD) -> int:
-    """Analyzes vibration data to count peaks above a certain threshold."""
-    if vibration_z_list.size == 0:
-        return 0
-    # A simple peak count - more sophisticated analysis could be done here
+    if vibration_z_list.size == 0: return 0
     peaks = np.where(vibration_z_list > threshold)[0]
     return len(peaks)
 
-# --- [PDF Generation Imports] ---
-from fastapi.responses import Response
-import io
-from datetime import datetime, time
+def create_waveform_image(audio_signature: List[float]) -> io.BytesIO:
+    if not audio_signature: return None
+    fig, ax = plt.subplots(figsize=(8, 2))
+    ax.plot(audio_signature, color='#3182F6', linewidth=1)
+    ax.set_title('Event Waveform', fontsize=10)
+    ax.axis('off')
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# --- PDF Imports ---
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import inch, mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.utils import ImageReader
-import pandas as pd
 import matplotlib
-matplotlib.use('Agg') # Use non-interactive backend
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
-# --- [End PDF Generation Imports] ---
 
 active_websocket_connections: List[WebSocket] = []
 
-# --- Helper function for PDF Chart Generation ---
 def create_noise_heatmap_image(logs: List[Dict]) -> io.BytesIO:
-    """
-    Creates a heatmap visualization of noise events by day of the week and hour.
-    Returns the image as an in-memory BytesIO buffer.
-    """
-    if not logs:
-        return None
-
-    # Process data into a DataFrame
+    if not logs: return None
     event_data = []
     for log in logs:
         severity = log.get("analysis", {}).get("severity")
         if severity in ["Red", "Yellow"]:
             try:
-                ts = datetime.fromisoformat(log.get("timestamp"))
+                ts = datetime.fromisoformat(log.get("timestamp").replace("Z",""))
                 event_data.append({"weekday": ts.weekday(), "hour": ts.hour})
-            except (ValueError, TypeError):
-                continue
-    
-    if not event_data:
-        return None
-
+            except: continue
+    if not event_data: return None
     df = pd.DataFrame(event_data)
-    
-    # Create a 2D pivot table for the heatmap
     heatmap_data = df.pivot_table(index='weekday', columns='hour', aggfunc='size', fill_value=0)
-    # Ensure all hours (0-23) and weekdays (0-6) are present
     heatmap_data = heatmap_data.reindex(index=range(7), columns=range(24), fill_value=0)
-    
     days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    
-    # Create plot using matplotlib
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(8, 3))
     cax = ax.pcolormesh(heatmap_data.columns, heatmap_data.index, heatmap_data.values, cmap='YlOrRd', shading='auto')
     fig.colorbar(cax, label='Event Count')
-
-    ax.set_title('Weekly Noise Heatmap (Critical Events)', fontsize=14)
-    ax.set_xlabel('Hour of Day')
-    ax.set_ylabel('Day of Week')
-    
-    ax.set_xticks(range(24))
+    ax.set_title('Weekly Heatmap', fontsize=10)
     ax.set_yticks(np.arange(7) + 0.5)
-    ax.set_yticklabels(days)
+    ax.set_yticklabels(days, fontsize=8)
     ax.invert_yaxis()
-
-    # Save plot to a memory buffer
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.savefig(buf, format='png', dpi=150)
     plt.close(fig)
     buf.seek(0)
-    
     return buf
 
-# --- API Endpoints ---
+def create_pie_chart_image(stats: Dict[str, int]) -> io.BytesIO:
+    labels = list(stats.keys())
+    sizes = list(stats.values())
+    if sum(sizes) == 0: return None
+    fig, ax = plt.subplots(figsize=(5, 3))
+    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# --- Endpoints ---
+
+@app.post("/notification/apology")
+async def handle_apology_notification(request: Request):
+    try:
+        body = await request.json()
+        sgn = body.get("m2m:sgn") or body.get("sgn")
+        content = None
+        if sgn and "nev" in sgn and "rep" in sgn["nev"]:
+            rep = sgn["nev"]["rep"]
+            content = rep.get("m2m:cin", {}).get("con") or rep.get("cin", {}).get("con")
+        
+        if content == "Apology Sent" or str(content).strip() == "1":
+            timestamp = datetime.now(timezone.utc).isoformat()
+            data = {"event": "apology", "message": "Apology Sent", "timestamp": timestamp}
+            # Save to history
+            create_content_instance(data, labels=["apology"], container_name=CNT_APOLOGY)
+            # Broadcast
+            for c in active_websocket_connections: await c.send_json(data)
+    except Exception as e: logger.error(f"Apology Error: {e}")
+    return {"status": "ok"}
 
 @app.post("/notification")
-async def handle_mobius_notification(notification: MobiusNotification):
-    """
-    Handles incoming notifications from Mobius, runs V2 AI model, manages event state,
-    calculates duration, and determines final severity based on new logic.
-    """
-    logger.info("Received notification from Mobius for V2 processing.")
-    
-    # 1. Parse incoming data
+async def handle_mobius_notification(request: Request): # [수정] dict 대신 Request 추가
     try:
-        raw_data_string = notification.sgn.nev.rep.con
-        payload_dict = json.loads(raw_data_string)
-        payload = NewPayload(**payload_dict)
-        logger.info(f"Successfully parsed raw data for house_id: {payload.house_id}")
-    except Exception as e:
-        logger.error(f"Error parsing notification payload: {e}")
-        raise HTTPException(status_code=400, detail="Invalid notification format or content.")
+        # [수정] 여기서부터 body를 가져옵니다.
+        body = await request.json()
+        print("📢 [RAW DATA RECEIVED]:", body)
+        if not body:
+            return {"status": "ignored", "reason": "empty body"}
 
-    # 2. Get AI Analysis & Sensor Data
-    sr_int = int(payload.meta.sampling_rate.replace('Hz', ''))
-    
-    # Convert raw sound to float32 numpy array for processing
-    audio_np = np.array(payload.payload.sound_raw, dtype=np.float32)
-    # Normalize audio if it's int16
-    if np.issubdtype(audio_np.dtype, np.integer):
-        audio_np = audio_np / 32768.0
-
-    processed_audio_v2 = preprocess_audio_for_v2(audio_np, sr=sr_int)
-    
-    if processed_audio_v2 is None:
-        logger.error("Failed to preprocess audio for V2 model.")
-        raise HTTPException(status_code=500, detail="Audio preprocessing failed.")
-
-    result_label, predicted_prob = predict_noise_v2(processed_audio_v2)
-    
-    # Get other sensor data for grading logic
-    calculated_db = amplitude_to_db(payload.payload.raw_max_amplitude)
-    vibration_np = np.array(payload.payload.vibration.get('z', []))
-    num_peaks = analyze_vibration_peaks(vibration_np)
-
-    # 3. Determine Preliminary Packet Severity
-    packet_severity = "Green"
-    is_footsteps = 'footsteps' in result_label.lower()
-
-    if is_footsteps and predicted_prob > 0.60:
-        packet_severity = "Yellow"
-        logger.info(f"[{payload.house_id}] Preliminary Severity: YELLOW (Footsteps detected with {predicted_prob:.2f} confidence)")
-    elif 65 <= calculated_db < 80:
-        packet_severity = "Yellow"
-        logger.info(f"[{payload.house_id}] Preliminary Severity: YELLOW (dB level is {calculated_db:.2f})")
-    elif num_peaks > 2: # Simple vibration check
-        packet_severity = "Yellow"
-        logger.info(f"[{payload.house_id}] Preliminary Severity: YELLOW (Vibration peaks detected: {num_peaks})")
-
-    # 4. Process State Machine
-    house_id = payload.house_id
-    current_time = datetime.fromisoformat(payload.timestamp)
-    state = house_states.get(house_id, HouseState())
-    
-    is_loud_packet = packet_severity in ["Yellow", "Red"]
-    notification_payload = None
-
-    if is_loud_packet:
-        if state.status == "quiet":
-            state.status = "loud"
-            state.start_time = current_time
-            logger.info(f"[{house_id}] Event Start: New loud event started.")
         
-        state.last_loud_time = current_time
-        state.last_packet_severity = packet_severity
-        state.start_of_quiet = None
-
-        event_duration = (current_time - state.start_time).total_seconds()
+        sgn = body.get("m2m:sgn") or body.get("sgn")
+        if not sgn: return {"status": "ignored"}
         
-        # Rule Check: Upgrade to RED based on duration and confidence
-        final_severity = packet_severity
-        if is_footsteps and predicted_prob > 0.75 and event_duration >= 5:
-            final_severity = "Red"
-            logger.info(f"[{house_id}] Severity UPGRADED to RED (Footsteps {predicted_prob:.2f} confidence & duration >= 5s).")
-            # This is a RED event, so we prepare to notify immediately
-            notification_payload = (final_severity, event_duration)
-        elif calculated_db >= 80 and event_duration >= 3:
-            final_severity = "Red"
-            logger.info(f"[{house_id}] Severity UPGRADED to RED (dB >= 80 & duration >= 3s).")
-            # This is also a RED event, notify immediately
-            notification_payload = (final_severity, event_duration)
-
-    else: # Packet is Green
-        if state.status == "loud":
-            if state.start_of_quiet is None:
-                state.start_of_quiet = current_time
-            
-            # If quiet period has passed since the last loud packet, the event has ended.
-            if (current_time - state.last_loud_time).total_seconds() >= QUIET_PERIOD_SECONDS:
-                event_duration = (state.last_loud_time - state.start_time).total_seconds()
-                final_severity = state.last_packet_severity
-                logger.info(f"[{house_id}] Event End: Quiet period detected. Final duration: {event_duration:.1f}s")
-                # Prepare to notify about the completed event
-                notification_payload = (final_severity, event_duration)
-                state = HouseState() # Reset state for the next event
-    
-    house_states[house_id] = state
-
-    # 5. Send Notification if a final decision was made
-    # Only send if there's a payload AND the AI classification for critical sounds is confident enough.
-    if notification_payload:
-        final_severity, event_duration = notification_payload
+        rep = sgn["nev"]["rep"]
+        raw_con = rep.get("m2m:cin", {}).get("con") or rep.get("cin", {}).get("con")
         
-        # Apply confidence gate: only send alert if AI is sure, or if it's a non-AI based alert (like high dB)
-        is_ai_confident = (is_footsteps and predicted_prob >= 0.75)
-        is_non_ai_alert = not is_footsteps and final_severity in ["Yellow", "Red"]
-
-        if is_ai_confident or is_non_ai_alert:
-            output_data = OneM2MPlatformOutput(
-                event_id=f"EVT_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
-                house_id=payload.house_id, timestamp=payload.timestamp,
-                analysis=AnalysisResult(
-                    result=result_label, probability=predicted_prob, db_level=calculated_db,
-                    severity=final_severity, duration=event_duration,
-                    vibration_peaks=num_peaks
-                ),
-                action=Action(mediation_sent=True, target=final_severity)
-            )
-
-            labels = ["analysis_result_v2", output_data.analysis.severity]
-            mobius_response = create_content_instance(output_data.dict(), labels=labels)
-            
-            if mobius_response:
-                logger.info(f"Successfully posted final event (V2) to Mobius for {house_id}.")
-                for connection in active_websocket_connections:
-                    await connection.send_json(output_data.dict())
-        else:
-            logger.info(f"[{house_id}] Event notification withheld. AI confidence ({predicted_prob:.2f}) for '{result_label}' is below the 0.75 threshold.")
-
-    return {"status": "success", "message": "Notification processed with V2 logic."}
-
-
-@app.get("/get_latest_noise_data")
-async def get_latest_noise_data():
-    logger.info("Proxy endpoint /get_latest_noise_data called by frontend.")
-    
-    # 1. mobius_client에서 데이터를 가져옴
-    content = retrieve_latest_content_instance()
-    
-    # 2. [핵심] 가져온 데이터가 있는지, 그리고 내용이 있는지 확인
-    if content:
-        # 터미널에 실제 나가는 데이터 모양을 찍어봅니다 (디버깅용)
-        print(f"DEBUG - 프론트엔드로 보낼 데이터: {content}")
-        return content
-    
-    # 3. 데이터가 없을 경우 에러 대신 '준비 중' 상태를 보냅니다.
-    logger.warning("가져온 데이터가 비어있습니다.")
-    return {
-        "analysis": {
-            "result": "연결 확인됨",
-            "db_level": 0,
-            "severity": "Green",
-            "note": "데이터 수신 대기 중..."
-        }
-    }
-@app.get("/logs")
-async def get_logs(limit: int = None):
-    try:
-        logs = retrieve_all_content_instances(limit=limit)
-        if logs is not None:
-            logger.info(f"Successfully retrieved {len(logs)} logs from Mobius (limit={limit}).")
-            return {"status": "success", "logs": logs}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to retrieve logs from Mobius.")
-    except Exception as e:
-        logger.exception("An error occurred while retrieving logs.")
-        raise HTTPException(status_code=500, detail="An error occurred while retrieving logs.")
-
-@app.get("/report/pdf")
-async def get_pdf_report(house_id: str, start_date: str, end_date: str):
-    """
-    Generates a PDF report for a given house_id and date range.
-    Date format for query parameters: YYYY-MM-DD
-    """
-    try:
-        # 1. Parse dates
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        # Include the entire end day
-        end_dt = datetime.combine(datetime.strptime(end_date, "%Y-%m-%d"), time.max)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
-
-    # 2. Fetch all logs
-    all_logs = retrieve_all_content_instances()
-    if not all_logs:
-        raise HTTPException(status_code=404, detail="No logs found on Mobius platform.")
-
-    # 3. Filter logs by house_id and date range
-    filtered_logs = []
-    severity_counts = {"Red": 0, "Yellow": 0, "Green": 0}
-
-    for log in all_logs:
-        if log.get("house_id") == house_id:
+        # JSON 문자열인 경우 안전하게 파싱
+        if isinstance(raw_con, str):
             try:
-                log_dt = datetime.fromisoformat(log.get("timestamp"))
-                if start_dt <= log_dt <= end_dt:
-                    filtered_logs.append(log)
-                    severity = log.get("analysis", {}).get("severity")
-                    if severity in severity_counts:
-                        severity_counts[severity] += 1
-            except (ValueError, TypeError):
-                # Ignore logs with invalid timestamp format
-                continue
+                payload_dict = json.loads(raw_con)
+            except json.JSONDecodeError:
+                logger.error("❌ JSON 파싱 실패: 데이터 형식이 올바르지 않습니다.")
+                return {"status": "error", "message": "Invalid JSON in con"}
+        else:
+            payload_dict = raw_con
+
+        # New Payload Parse
+        house_id = payload_dict.get("house_id", "unknown")
+        timestamp = payload_dict.get("timestamp", datetime.now().isoformat())
+        meta = payload_dict.get("meta", {})
+        payload = payload_dict.get("payload", {})
+        # 1. Data Prep & Validation (리더 규리님 수정 버전)
+        # payload_dict에서 실제 데이터가 들어있는 payload 부분을 먼저 가져옵니다.
+        sensor_data = payload_dict.get("payload", {}) 
+        sound_raw = sensor_data.get("sound_raw", []) # payload 안에서 sound_raw 추출
+        vibration_z = payload.get("vibration", {}).get("z", [])
+        raw_max_amplitude = payload.get("raw_max_amplitude", 0)
+
+        audio_np = np.array(sound_raw, dtype=np.float32)
+        print(f"🔍 [DEBUG] 수신된 오디오 샘플 개수: {len(audio_np)}개")
+        # 3. 데이터 보정 (Zero-Padding)
+        if len(audio_np) < 80:
+            return {"status": "skipped", "reason": "too short"}
+        if len(audio_np) < 1000:
+            audio_np = np.concatenate([audio_np, np.zeros(1000 - len(audio_np))])
+
+        vibration_z = payload_dict.get("payload", {}).get("vibration", {}).get('z', [])
+        vibration_np = np.array(vibration_z)
+        # Calculate pure shock by removing 1.0g gravity component
+        vibration_max = float(np.max(np.abs(vibration_np - 1.0))) if vibration_np.size > 0 else 0.0
+        
+        # Signature
+        target_sig_len = 300
+        audio_signature = audio_np.tolist()
+        if len(audio_np) > target_sig_len:
+            indices = np.linspace(0, len(audio_np)-1, target_sig_len).astype(int)
+            audio_signature = audio_np[indices].tolist()
+
+        # 2. AI Inference
+        sr_val = meta.get("sampling_rate", "16000Hz")
+        sr_int = int(str(sr_val).lower().replace("hz",""))
+        audio_input = audio_np.flatten()
+        processed = preprocess_audio_for_v2(audio_np, sr=sr_int)
+        if hasattr(processed, 'numpy'): # 텐서 형태일 경우
+            processed_input = processed.numpy().flatten()
+        else: # 넘파이 형태일 경우
+            processed_input = np.array(processed).flatten()
+        result_label, predicted_prob = predict_noise_v2(processed, sr=sr_int, vibration_z = vibration_z)
+        
+        logger.info(f"✅ 분석 성공! 결과: {result_label} ({predicted_prob:.2f})")
     
-    # Sort logs by timestamp
-    filtered_logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        # 3. Grading
+        raw_amp = payload.get("raw_max_amplitude", 0)
+        calc_db = amplitude_to_db(raw_amp)
+        num_peaks = analyze_vibration_peaks(vibration_np)
+        
+        sev = "Green"
+        is_foot = "footsteps" in result_label.lower()
+        if is_foot and predicted_prob > 0.6: sev = "Yellow"
+        elif 65 <= calc_db < 80: sev = "Yellow"
+        elif num_peaks > 2: sev = "Yellow"
+        
+        # 4. State Machine
+        current_time = datetime.fromisoformat(timestamp.replace("Z",""))
+        state = house_states.get(house_id, HouseState())
+        
+        final_sev = sev
+        if state.start_time:
+            dur = (current_time - state.start_time).total_seconds()
+            if is_foot and predicted_prob > 0.75 and dur >= 5: final_sev = "Red"
+            elif calc_db >= 80 and dur >= 3: final_sev = "Red"
+        
+        if final_sev in ["Yellow", "Red"]:
+            if state.status == "quiet":
+                state.status = "loud"
+                state.start_time = current_time
+            state.last_loud_time = current_time
+        else:
+            if state.status == "loud" and (current_time - state.last_loud_time).total_seconds() >= 5:
+                state.status = "quiet"
+                state.start_time = None
+        house_states[house_id] = state
+        
+        # 5. Post & Broadcast
+        # A. Status to CNT_STATUS
+        status_data = {"event_id": f"STS_{datetime.now().strftime('%Y%m%d%H%M%S')}", "house_id": house_id, "grade": final_sev, "db": calc_db, "timestamp": timestamp}
+        create_content_instance(status_data, labels=["grade"], container_name=CNT_STATUS)
+        
+        # B. Analysis to CNT_NOISE
+        analysis_res = AnalysisResult(
+            result=result_label, probability=float(predicted_prob), db_level=float(calc_db), severity=final_sev,
+            duration=0.0, vibration_peaks=num_peaks, vibration_max=vibration_max, audio_signature=audio_signature
+        )
+        output_data = OneM2MPlatformOutput(
+            event_id=f"EVT_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            house_id=house_id, timestamp=timestamp, analysis=analysis_res,
+            action=Action(mediation_sent=(final_sev=="Red"), target=final_sev)
+        )
+        out_dict = output_data.dict(exclude_none=True)
+        # Ensure vibration_max is in analysis for frontend
+        create_content_instance(out_dict, labels=["analysis"], container_name=CNT_NOISE)
+        
+        for c in active_websocket_connections: await c.send_json(out_dict)
+        
+        return {"status": "success", "result": result_label}
+        
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return {"status": "error"}
 
-    # 4. Generate PDF in memory
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
-    
-    story = []
-    styles = getSampleStyleSheet()
-
-    # Title
-    story.append(Paragraph(f"층간소음 분석 리포트", styles['h1']))
-    story.append(Paragraph(f"({house_id})", styles['h2']))
-    story.append(Paragraph(f"리포트 기간: {start_date} ~ {end_date}", styles['Normal']))
-    story.append(Paragraph("<br/><br/>", styles['Normal']))
-
-    # Summary Section
-    story.append(Paragraph("소음 발생 요약", styles['h3']))
-    summary_text = f"""
-    - <font color='red'>Red (경고)</font>: {severity_counts['Red']} 회
-    - <font color='orange'>Yellow (주의)</font>: {severity_counts['Yellow']} 회
-    - <font color='green'>Green (안정)</font>: {severity_counts['Green']} 회
-    """
-    story.append(Paragraph(summary_text, styles['BodyText']))
-    story.append(Paragraph("<br/><br/>", styles['Normal']))
-
-    # --- NEW: Add Heatmap to PDF ---
-    story.append(Paragraph("주간/시간대별 소음 발생 빈도", styles['h3']))
-    heatmap_buffer = create_noise_heatmap_image(filtered_logs)
-    if heatmap_buffer:
-        story.append(Image(ImageReader(heatmap_buffer), width=6*inch, height=2.5*inch))
-    else:
-        story.append(Paragraph("시각화할 데이터가 부족합니다.", styles['Normal']))
-    story.append(Paragraph("<br/><br/>", styles['Normal']))
-    # --- END NEW SECTION ---
-
-    # Detailed Log Section
-    story.append(Paragraph("상세 발생 이력", styles['h3']))
-    
-    if not filtered_logs:
-        story.append(Paragraph("해당 기간에 기록된 소음 데이터가 없습니다.", styles['Normal']))
-    else:
-        table_data = [["타임스탬프", "소음 종류", "심각도", "지속 시간(초)", "최대 데시벨", "주요 진동 주파수"]]
-        for log in filtered_logs:
-            analysis = log.get("analysis", {})
-            
-            severity = analysis.get("severity", "N/A")
-            if severity == "Red":
-                severity_p = Paragraph(f"<font color='red'>{severity}</font>", styles['Normal'])
-            elif severity == "Yellow":
-                severity_p = Paragraph(f"<font color='orange'>{severity}</font>", styles['Normal'])
-            else:
-                severity_p = Paragraph(f"<font color='green'>{severity}</font>", styles['Normal'])
-
-            dom_freq_text = f"{analysis.get('dominant_frequency', 0.0):.1f} Hz"
-            duration_text = f"{analysis.get('duration', 0.0):.1f}s"
-
-            table_data.append([
-                log.get("timestamp", "N/A"),
-                analysis.get("result", "N/A"),
-                severity_p,
-                duration_text,
-                f"{analysis.get('db_level', 0):.2f} dB",
-                dom_freq_text
-            ])
-
-        # Create Table
-        t = Table(table_data, colWidths=[1.5*inch, 1.1*inch, 0.7*inch, 0.8*inch, 1*inch, 1.2*inch])
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.grey),
-            ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 12),
-            ('BACKGROUND', (0,1), (-1,-1), colors.beige),
-            ('GRID', (0,0), (-1,-1), 1, colors.black)
-        ]))
-        story.append(t)
-
-    doc.build(story)
-
-    # 5. Return PDF as a response
-    buffer.seek(0)
-    pdf_bytes = buffer.getvalue()
-    buffer.close()
-    
-    return Response(
-        content=pdf_bytes,
-        media_type='application/pdf',
-        headers={'Content-Disposition': f'attachment; filename="report_{house_id}_{start_date}_to_{end_date}.pdf"'}
-    )
-
-@app.websocket("/ws/logs")
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_websocket_connections.append(websocket)
-    logger.info(f"WebSocket client connected: {websocket.client}")
     try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        active_websocket_connections.remove(websocket)
-        logger.info(f"WebSocket client disconnected: {websocket.client}")
-    except Exception as e:
-        if websocket in active_websocket_connections:
-            active_websocket_connections.remove(websocket)
-        logger.exception(f"Unhandled error in WebSocket connection for client {websocket.client}.")
+        while True: await websocket.receive_text()
+    except: active_websocket_connections.remove(websocket)
 
-@app.websocket("/ws/noise")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+@app.get("/get_latest_noise_data")
+async def get_latest_noise_data():
+    content = retrieve_latest_content_instance()
+    if content: return content
+    return {"analysis": {"result": "대기 중", "db_level": 0, "severity": "Green"}}
+
+@app.get("/logs")
+async def get_logs(limit: int = None):
+    logs = retrieve_all_content_instances(limit=limit)
+    if logs is not None:
+        return {"status": "success", "logs": logs}
+    # Only raise 500 if it's truly None (error), but retrieve_all... returns [] on valid empty.
+    # So this might catch network errors which return [] too? 
+    # mobius_client returns [] on error. Ideally we want to distinguish.
+    # But for now, returning success with empty list is safer for the frontend.
+    return {"status": "success", "logs": []}
+
+def get_logs_for_report(house_id, start_dt, end_dt):
+    all_logs = retrieve_all_content_instances()
+    if not all_logs and MOCK_DATA_MODE:
+        return []
+    filtered = []
+    for log in all_logs:
+        if log.get("house_id") != house_id: continue
+        try:
+            ts = datetime.fromisoformat(log.get("timestamp").replace("Z",""))
+            if start_dt <= ts <= end_dt: filtered.append(log)
+        except: continue
+    filtered.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return filtered
+
+@app.get("/report/csv")
+async def get_csv_report(house_id: str, start_date: str, end_date: str):
     try:
-        while True:
-            # 1. 학교 서버에서 최신 데이터 가져오기
-            response = requests.get(MOBIUS_URL, headers=HEADERS)
-            if response.status_code == 200:
-                content = response.json()['m2m:cin']['con']
-                
-                # 2. 대시보드로 실시간 전송
-                await websocket.send_json({
-                    "type": content['analysis']['result'],    # Footstep
-                    "db": content['analysis']['db_level'],     # 75.2
-                    "severity": content['analysis']['severity'] # Red
-                })
-            
-            await asyncio.sleep(2)  # 2초마다 업데이트
-    except Exception as e:
-        print(f"연결 종료: {e}")
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.combine(datetime.strptime(end_date, "%Y-%m-%d"), dt_time.max)
+    except: raise HTTPException(400, "Invalid date")
+    logs = get_logs_for_report(house_id, start_dt, end_dt)
+    output = io.StringIO()
+    output.write(u'\ufeff')
+    writer = csv.writer(output)
+    writer.writerow(['timestamp', 'event', 'result', 'db', 'prob', 'severity', 'vib_max', 'mediation'])
+    for log in logs:
+        a = log.get("analysis", {})
+        writer.writerow([
+            log.get("timestamp"), log.get("event_id"), a.get("result"), a.get("db_level"),
+            a.get("probability"), a.get("severity"), a.get("vibration_max", 0), log.get("action", {}).get("mediation_sent")
+        ])
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=report.csv"})
+
+@app.get("/report/pdf")
+async def get_pdf_report(house_id: str, start_date: str, end_date: str):
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.combine(datetime.strptime(end_date, "%Y-%m-%d"), dt_time.max)
+    except: raise HTTPException(400, "Invalid date")
+    logs = get_logs_for_report(house_id, start_dt, end_dt)
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    story = []
+    styles = getSampleStyleSheet()
+    story.append(Paragraph(f"Noise Report: {house_id}", styles['Title']))
+    
+    # Add Heatmap
+    hm = create_noise_heatmap_image(logs)
+    if hm: story.append(Image(hm, width=6*inch, height=2.5*inch))
+    
+    # Add Waveform of Critical Event
+    max_ev = None
+    for log in logs:
+        sev = log.get("analysis", {}).get("severity")
+        if sev == "Red":
+            max_ev = log
+            break
+    if max_ev:
+        sig = max_ev.get("analysis", {}).get("audio_signature")
+        wf = create_waveform_image(sig)
+        if wf: story.append(Image(wf, width=6*inch, height=1.5*inch))
+        
+    doc.build(story)
+    buffer.seek(0)
+    return Response(content=buffer.getvalue(), media_type='application/pdf', headers={'Content-Disposition': 'attachment; filename=report.pdf'})

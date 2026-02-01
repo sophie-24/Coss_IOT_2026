@@ -1,10 +1,12 @@
 fastapi
 pydantic
 numpy
+pandas
 tensorflow
+tensorflow-hub
 librosa
 requests
-uvicorn # For running the FastAPI server
-reportlab # For PDF generation
-matplotlib # For chart generation in PDF
-joblib # For saving/loading scikit-learn objects
+uvicorn
+reportlab
+matplotlib
+joblib

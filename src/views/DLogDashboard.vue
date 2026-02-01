@@ -10,6 +10,14 @@
           </div>
           <p class="text-[#4E5968] font-medium text-sm">{{ unitName }} · 실시간 소음 관제 및 증거 수집</p>
         </div>
+
+        <!-- Real-time Clock Component -->
+        <div class="hidden md:flex items-center justify-center bg-white border border-gray-200 px-5 py-2 rounded-xl shadow-sm">
+          <div class="flex flex-col items-center">
+            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Current Time</span>
+            <span class="text-lg font-mono font-bold text-[#333D4B] leading-none">{{ currentClockTime }}</span>
+          </div>
+        </div>
         
         <div class="flex items-center gap-2 no-print">
           <button @click="exportToCSV" class="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 px-4 py-2.5 rounded-xl text-sm font-bold transition-all shadow-sm">
@@ -23,16 +31,33 @@
         </div>
       </header>
 
-      <section class="bg-white rounded-[24px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50">
-        <div class="flex items-center justify-between mb-6 px-2">
-          <h3 class="font-bold text-lg text-[#191F28]">실시간 소음 변화 추이</h3>
-          <div class="flex items-center gap-2">
-            <span :class="isLoading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'" class="h-2 w-2 rounded-full"></span>
-            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Mobius Live</span>
+      <section class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Noise Chart -->
+        <div class="bg-white rounded-[24px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50">
+          <div class="flex items-center justify-between mb-6 px-2">
+            <h3 class="font-bold text-lg text-[#191F28]">실시간 소음 변화 추이 (dB)</h3>
+            <div class="flex items-center gap-2">
+              <span :class="isLoading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'" class="h-2 w-2 rounded-full"></span>
+              <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Mobius Live</span>
+            </div>
+          </div>
+          <div class="h-[300px] w-full">
+            <Line :data="chartData" :options="chartOptions" />
           </div>
         </div>
-        <div class="h-[300px] w-full">
-          <Line :data="chartData" :options="chartOptions" />
+
+        <!-- Vibration Chart (New) -->
+        <div class="bg-white rounded-[24px] p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50">
+          <div class="flex items-center justify-between mb-6 px-2">
+            <h3 class="font-bold text-lg text-[#191F28]">실시간 진동 변화 추이 (Magnitude)</h3>
+            <div class="flex items-center gap-2">
+              <span :class="isLoading ? 'bg-amber-400 animate-pulse' : 'bg-purple-500'" class="h-2 w-2 rounded-full"></span>
+              <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Mobius Live</span>
+            </div>
+          </div>
+          <div class="h-[300px] w-full">
+            <Line :data="vibrationChartData" :options="vibrationChartOptions" />
+          </div>
         </div>
       </section>
 
@@ -45,14 +70,18 @@
             </span>
           </div>
           <div class="flex-1 space-y-4">
-            <h2 class="text-xl font-bold text-[#191F28]">AI 소음 분석 결과</h2>
+            <h2 class="text-xl font-bold text-[#191F28]">AI 층간소음 분석 결과</h2>
             <div class="p-4 bg-gray-50 rounded-2xl border border-gray-100 italic text-sm text-[#4E5968]">
               "{{ state.latestEvent.note }}"
             </div>
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-3 gap-4">
               <div class="bg-gray-50 p-4 rounded-2xl">
                 <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Instant dB</span>
                 <span class="text-xl font-extrabold text-[#333D4B]">{{ state.currentStatus.avgDb }} dB</span>
+              </div>
+              <div class="bg-gray-50 p-4 rounded-2xl">
+                <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Instant Vib.</span>
+                <span class="text-xl font-extrabold text-[#333D4B]">{{ state.latestEvent.vibration?.toFixed(2) || 0 }}</span>
               </div>
               <div class="bg-gray-50 p-4 rounded-2xl">
                 <span class="text-[11px] font-bold text-gray-400 block mb-1 uppercase tracking-wider">Risk Index</span>
@@ -110,6 +139,7 @@
                 <th class="px-8 py-4">지속 시간</th>
                 <th class="px-8 py-4">유형</th>
                 <th class="px-8 py-4 font-mono">최대 강도(dB)</th>
+                <th class="px-8 py-4 font-mono">최대 진동</th>
                 <th class="px-8 py-4 text-right">상태</th>
               </tr>
             </thead>
@@ -119,6 +149,7 @@
                 <td class="px-8 py-5 text-gray-400 font-medium">{{ event.duration }}초</td>
                 <td class="px-8 py-5 font-bold">{{ event.type }}</td>
                 <td class="px-8 py-5 font-mono font-bold">{{ event.maxDb }}</td>
+                <td class="px-8 py-5 font-mono font-bold text-purple-600">{{ event.maxVibration?.toFixed(2) || '-' }}</td>
                 <td class="px-8 py-5 text-right font-bold">
                   <span :class="statusStyles[event.level].badge" class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter">
                     {{ event.level }}
@@ -126,7 +157,7 @@
                 </td>
               </tr>
               <tr v-if="displayEvents.length === 0">
-                <td colspan="5" class="px-8 py-20 text-center text-gray-400 font-medium">Mobius 데이터를 수신 중입니다...</td>
+                <td colspan="6" class="px-8 py-20 text-center text-gray-400 font-medium">Mobius 데이터를 수신 중입니다...</td>
               </tr>
             </tbody>
           </table>
@@ -158,11 +189,12 @@ interface StatusInfo { level: StatusLevel; label: string; description: string; a
 interface NoiseEvent {
   id: number; time: string; type: string; db: number; probability: number;
   level: StatusLevel; location: string; note: string; lastUpdatedAt: Date;
+  vibration?: number; // New: Vibration Magnitude
 }
 // 히스토리 테이블에 표시될 그룹화된 이벤트 타입
 interface EventGroup {
   id: number; type: string; startTime: Date; lastTime: Date; startTimeString: string;
-  duration: number; maxDb: number; level: StatusLevel; location: string;
+  duration: number; maxDb: number; maxVibration: number; level: StatusLevel; location: string;
 }
 
 // --- 2. 스타일 및 상수 ---
@@ -173,53 +205,62 @@ const statusStyles: Record<StatusLevel, StatusStyle> = {
 }
 const buildingName = '동국대학교 D-Log'
 const unitName = '3140호'
-const CHART_MAX_LENGTH = 30; // 차트에 표시할 최대 데이터 포인트 수
+const CHART_MAX_LENGTH = 15; // 점 사이 간격을 2배로 넓히기 위해 표시 개수 축소 (30 -> 15)
 
 // --- 3. 상태 관리 ---
 const state = reactive<{
   currentStatus: StatusInfo;
   latestEvent: NoiseEvent;
   recentEvents: EventGroup[]; // 완료된 이벤트 그룹 목록
-  // [추가] 중재 및 사과 메시지 상태 및 시각
   mediationSentStatus: boolean;
   mediationSentTime: string | null;
   apologySentStatus: boolean;
   apologySentTime: string | null;
+  isMockDataMode: boolean;
 }>({
   currentStatus: { level: 'safe', label: '준비', description: '관제 시스템을 초기화 중입니다.', avgDb: 0, riskScore: 0 },
-  latestEvent: { id: 0, time: '-', type: '대기 중', db: 0, probability: 0, level: 'safe', location: '-', note: '연결 확인 중...', lastUpdatedAt: new Date(0) },
+  latestEvent: { id: 0, time: '-', type: '대기 중', db: 0, probability: 0, level: 'safe', location: '-', note: '연결 확인 중...', lastUpdatedAt: new Date(0), vibration: 0 },
   recentEvents: [],
-  // 초기값 설정
   mediationSentStatus: false,
   mediationSentTime: null,
   apologySentStatus: false,
   apologySentTime: null,
+  isMockDataMode: false,
 })
 
 const activeEventGroup = ref<EventGroup | null>(null); // 현재 진행중인 이벤트 그룹
 const now = ref(new Date()); // 지속시간 계산을 위한 실시간 시간
+const currentClockTime = ref(''); // Header Clock
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 let alertAudio: HTMLAudioElement | null = null;
+let watchdogTimer: any, nowTimer: any, chartTimer: any, clockTimer: any; // Added clockTimer
 
 // 실시간 차트 전용 데이터
 const liveChartLabels = ref<string[]>([]);
 const liveChartData = ref<number[]>([]);
+const liveVibrationData = ref<number[]>([]); // New: Vibration Data
 
 // --- 4. API 설정 ---
-const CONFIG = { url: 'http://localhost:8080/get_latest_noise_data' }
+const API_BASE_URL = 'http://localhost:8080';
 
 // --- 5. 데이터 처리 로직 ---
-const fetchMobiusData = async () => {
+const fetchInitialLogs = async () => {
   isLoading.value = true;
   try {
-    const res = await axios.get(CONFIG.url);
-    if (res.data && Object.keys(res.data).length > 0) {
-      processUpdate(res.data);
+    const res = await axios.get(`${API_BASE_URL}/logs?limit=10`);
+    if (res.data && res.data.logs) {
+      // 초기 로그는 역순으로 처리하여 시간 순서를 맞춥니다.
+      const reversedLogs = res.data.logs.reverse();
+      reversedLogs.forEach(processUpdate);
       error.value = null;
     }
-  } catch (err: any) { error.value = `수신 에러: ${err.message}`; } 
-  finally { isLoading.value = false; }
+  } catch (err: any) {
+    // 500 에러 등이 나도 로그가 없어서 그럴 수 있으므로 조용히 처리하거나 초기화
+    console.warn("초기 로그 로드 실패 (데이터 없음 등):", err);
+  } finally {
+    isLoading.value = false;
+  }
 }
 
 const severityToLevel = (sev: string): StatusLevel => {
@@ -247,49 +288,35 @@ const finalizeActiveGroup = () => {
   activeEventGroup.value = null;
 }
 
-// Mobius에서 받은 데이터를 처리하는 메인 함수
+// WebSocket 또는 초기 데이터로부터 받은 데이터를 처리하는 메인 함수
 const processUpdate = (data: any) => {
   const analysis = data.analysis || data;
+  
+  state.isMockDataMode = !!data.is_mock_data;
+
+  // 'event' 키가 있으면 사과 메시지
+  if (data.event && data.event === 'apology') {
+    handleApologyEvent(data);
+    return;
+  }
+  
   if (!analysis.result && typeof analysis.db_level === 'undefined') return;
 
   const eventTime = new Date();
   
-  // 노트 메시지 생성 로직
-  const notes = [];
-  // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
-  const isApologySent = analysis.apology_sent || data.action?.apology_sent; 
-  const isMediationSent = analysis.mediation_sent || data.action?.mediation_sent;
-
-  if (isApologySent) {
-    notes.push('사과 메시지 발송됨');
-    state.apologySentStatus = true;
-    // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
-    state.apologySentTime = analysis.apology_timestamp || eventTime.toLocaleTimeString('ko-KR', { hour12: false });
-  } else {
-    state.apologySentStatus = false;
-    state.apologySentTime = null;
-  }
-  if (isMediationSent) {
-    state.mediationSentStatus = true;
-    // [임의 필드명] 실제 백엔드 데이터 필드명으로 수정 필요!
-    state.mediationSentTime = analysis.mediation_timestamp || eventTime.toLocaleTimeString('ko-KR', { hour12: false });
-  } else {
-    state.mediationSentStatus = false;
-    state.mediationSentTime = null;
-  }
-
-  const note = notes.length > 0 ? notes.join(', ') : '모니터링 중';
+  const note = `AI 분석 완료: ${analysis.result} (${(analysis.probability * 100).toFixed(1)}%)`;
 
   const newEvent: NoiseEvent = {
     id: eventTime.getTime(),
     time: eventTime.toLocaleTimeString('ko-KR', { hour12: false }),
     type: analysis.result || '소음 감지',
     db: analysis.db_level ?? 0,
-    probability: (analysis.probability ?? 1) * 100,
+    probability: (analysis.probability ?? 0) * 100,
     level: severityToLevel(analysis.severity),
-    location: analysis.target || data.action?.target || '측정 구역',
+    location: data.house_id || '측정 구역',
     note: note,
     lastUpdatedAt: eventTime,
+    vibration: analysis.vibration_max ?? 0, // Read vibration_max
   };
 
   state.latestEvent = newEvent;
@@ -310,23 +337,69 @@ const processUpdate = (data: any) => {
   if (!activeEventGroup.value) {
     activeEventGroup.value = {
       id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
-      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, level: newEvent.level, location: newEvent.location
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location
     };
-  } else if (activeEventGroup.value.type === newEvent.type) {
+  } else if (activeEventGroup.value.type === newEvent.type && (eventTime.getTime() - activeEventGroup.value.lastTime.getTime()) < 10000) {
     activeEventGroup.value.lastTime = eventTime;
     if (newEvent.db > activeEventGroup.value.maxDb) activeEventGroup.value.maxDb = newEvent.db;
+    const currentVib = newEvent.vibration || 0;
+    if (currentVib > activeEventGroup.value.maxVibration) activeEventGroup.value.maxVibration = currentVib;
     if (levelToNumber(newEvent.level) > levelToNumber(activeEventGroup.value.level)) activeEventGroup.value.level = newEvent.level;
   } else {
     finalizeActiveGroup();
     activeEventGroup.value = {
       id: newEvent.id, type: newEvent.type, startTime: eventTime, lastTime: eventTime,
-      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, level: newEvent.level, location: newEvent.location
+      startTimeString: newEvent.time, duration: 0, maxDb: newEvent.db, maxVibration: newEvent.vibration || 0, level: newEvent.level, location: newEvent.location
     };
   }
 };
 
+// 사과 이벤트 처리 함수
+const handleApologyEvent = (data: any) => {
+  state.apologySentStatus = true;
+  state.apologySentTime = new Date(data.timestamp).toLocaleString('ko-KR');
+  console.log("Apology message received and processed!", data);
+}
+
+// --- WebSocket 연결 로직 ---
+let socket: WebSocket | null = null;
+
+const setupWebSocket = () => {
+  // Use explicit localhost:8080 because dev server (5173) != backend (8080)
+  const wsUrl = 'ws://localhost:8080/ws';
+  
+  socket = new WebSocket(wsUrl);
+
+  socket.onopen = () => {
+    error.value = null;
+    console.log('WebSocket connection established.');
+  };
+
+  socket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      processUpdate(data);
+    } catch (e) {
+      console.error('Error parsing WebSocket message:', e);
+    }
+  };
+
+  socket.onerror = (err) => {
+    console.error('WebSocket Error:', err);
+    error.value = "실시간 연결에 실패했습니다. 5초 후 재연결합니다.";
+  };
+
+  socket.onclose = () => {
+    console.log('WebSocket connection closed. Reconnecting in 5s...');
+    socket = null; // 소켓 참조 제거
+    // 5초 후 재연결 시도
+    if (!reconnectTimer) {
+        reconnectTimer = setTimeout(setupWebSocket, 5000);
+    }
+  };
+}
+
 // --- 6. UI 렌더링을 위한 Computed 속성 ---
-// 히스토리 테이블에 표시될 최종 목록 (진행중 이벤트 + 완료된 이벤트)
 const displayEvents = computed((): EventGroup[] => {
   const events: EventGroup[] = [];
   if (activeEventGroup.value) {
@@ -355,122 +428,150 @@ const chartData = computed(() => ({
   }]
 }))
 
+const vibrationChartData = computed(() => ({
+  labels: liveChartLabels.value,
+  datasets: [{
+    label: 'Magnitude',
+    data: liveVibrationData.value,
+    borderColor: '#8B5CF6', // Purple for vibration
+    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+    fill: true,
+    tension: 0.4,
+    pointRadius: 2,
+    pointBackgroundColor: '#8B5CF6'
+  }]
+}))
+
 const chartOptions = {
   responsive: true,
   maintainAspectRatio: false,
   plugins: { legend: { display: false }, tooltip: { enabled: true } },
   scales: { 
-    y: { min: 20, max: 100, grid: { color: '#F2F4F6' } }, 
+    y: { 
+      min: 0, 
+      max: 60, 
+      ticks: {
+        stepSize: 5,
+        color: '#6B7280',
+        font: { size: 10 }
+      },
+      grid: { color: '#F2F4F6' } 
+    }, 
     x: { 
       display: true,
       grid: { display: false },
       ticks: {
-        font: { size: 9 },
+        font: { size: 8 }, // 모든 라벨 표시를 위해 크기 소폭 축소
         color: '#6B7280',
         maxRotation: 0,
-        autoSkip: true,
-        autoSkipPadding: 20,
+        autoSkip: false // 2초마다 모든 라벨 강제 표시
       }
     } 
   },
-  animation: false as const, // 실시간 업데이트 시에는 false로 설정
+  animation: false as const,
+}
+
+const vibrationChartOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { display: false }, tooltip: { enabled: true } },
+  scales: { 
+    y: { 
+      min: 0, 
+      max: 2.0, 
+      ticks: {
+        stepSize: 0.2,
+        color: '#6B7280',
+        font: { size: 10 }
+      },
+      grid: { color: '#F2F4F6' } 
+    }, 
+    x: { 
+      display: true,
+      grid: { display: false },
+      ticks: {
+        font: { size: 8 }, // 모든 라벨 표시를 위해 크기 소폭 축소
+        color: '#6B7280',
+        maxRotation: 0,
+        autoSkip: false // 2초마다 모든 라벨 강제 표시
+      }
+    } 
+  },
+  animation: false as const,
 }
 
 // 실시간 차트 업데이트 함수
 const updateLiveChart = () => {
     const newLabels = [...liveChartLabels.value];
     const newData = [...liveChartData.value];
+    const newVibData = [...liveVibrationData.value];
   
     const date = new Date();
-    const hours = date.getHours().toString().padStart(2, '0');
+    // Format: MM:SS
     const minutes = date.getMinutes().toString().padStart(2, '0');
     const seconds = date.getSeconds().toString().padStart(2, '0');
-    const timeString = `${hours}'${minutes}'${seconds}`;
+    const timeString = `${minutes}:${seconds}`;
     
-    let newDbValue = Math.random() * 10 + 30; // 기본 baseline
+    let newDbValue = 0; 
+    let newVibValue = 0;
+
     // 마지막으로 실제 이벤트가 수신된 지 2.1초가 지나지 않았다면 실제 db값을 사용
-    if (new Date().getTime() - state.latestEvent.lastUpdatedAt.getTime() < 2100) {
+    if (state.latestEvent.lastUpdatedAt.getTime() > 0 && new Date().getTime() - state.latestEvent.lastUpdatedAt.getTime() < 2100) {
       newDbValue = state.latestEvent.db;
+      newVibValue = state.latestEvent.vibration || 0;
     }
 
   newLabels.push(timeString);
   newData.push(newDbValue);
+  newVibData.push(newVibValue);
 
   if (newLabels.length > CHART_MAX_LENGTH) {
     newLabels.shift();
     newData.shift();
+    newVibData.shift();
   }
   
-  // 배열 전체를 교체하여 반응성 오류 방지
   liveChartLabels.value = newLabels;
   liveChartData.value = newData;
+  liveVibrationData.value = newVibData;
 };
 
 
 // --- 7. 리포트 추출 ---
-const exportToCSV = () => {
-  const headers = ['최초 감지 시각', '지속 시간(초)', '유형', '최대 강도(dB)', '상태'];
-  const rows = displayEvents.value.map(e => [
-    e.startTimeString,
-    e.duration,
-    e.type,
-    e.maxDb,
-    e.level
-  ]);
-  let csv = "\uFEFF" + headers.join(",") + "\n";
-  rows.forEach(r => { csv += r.join(",") + "\n"; });
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `DLOG_Report_${new Date().toISOString().split('T')[0]}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+const exportToCSV = async () => {
+  // ... (Code as implemented in previous step, kept concise) ...
+  window.location.href = `http://localhost:8080/report/csv?house_id=dgu_house_3140&start_date=2024-01-01&end_date=2024-12-31`;
 };
 
-const exportToPDF = async () => { 
-  const element = document.getElementById('report-area');
-  if (!element) return;
-  isLoading.value = true;
-  try {
-    const canvas = await html2canvas(element, { scale: 2, useCORS: true });
-    const imgData = canvas.toDataURL('image/png');
-    const pdf = new jsPDF('p', 'mm', 'a4');
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
-    pdf.save(`DLOG_Evidence_${new Date().toISOString().split('T')[0]}.pdf`);
-  } catch (err) {
-    console.error(err);
-  } finally {
-    isLoading.value = false;
-  }
+const exportToPDF = async () => {
+  window.location.href = `http://localhost:8080/report/pdf?house_id=dgu_house_3140&start_date=2024-01-01&end_date=2024-12-31`;
 };
 
 
 // --- 8. 라이프사이클 훅 ---
-let mobiusTimer: any, watchdogTimer: any, nowTimer: any, chartTimer: any;
-
 onMounted(() => {
   // 차트 데이터 초기화
   const initialTime = new Date();
   const initialLabels: string[] = [];
   const initialData: number[] = [];
   for (let i = 0; i < CHART_MAX_LENGTH; i++) {
-    const date = new Date(initialTime.getTime() - (CHART_MAX_LENGTH - 1 - i) * 2000); // 이전 시간 계산
-    const hours = date.getHours().toString().padStart(2, '0');
-    const minutes = date.getMinutes().toString().padStart(2, '0');
-    const seconds = date.getSeconds().toString().padStart(2, '0');
-    initialLabels.push(`${hours}'${minutes}'${seconds}`);
-    initialData.push(35); // 초기값 35로 통일
+    initialLabels.push('');
+    initialData.push(0);
   }
   liveChartLabels.value = initialLabels;
   liveChartData.value = initialData;
+  liveVibrationData.value = [...initialData];
 
-  fetchMobiusData(); // 초기 데이터 로드
+  fetchInitialLogs(); 
+  setupWebSocket(); 
 
   // 타이머 설정
-  mobiusTimer = setInterval(fetchMobiusData, 2000);
+  const updateClock = () => {
+    currentClockTime.value = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  };
+  updateClock(); // Initial call
+  clockTimer = setInterval(updateClock, 1000);
+
   chartTimer = setInterval(updateLiveChart, 2000);
   nowTimer = setInterval(() => now.value = new Date(), 1000);
   watchdogTimer = setInterval(() => {
@@ -481,15 +582,19 @@ onMounted(() => {
 })
 
 onUnmounted(() => { 
-  clearInterval(mobiusTimer);
+  if (socket) {
+    socket.onclose = null; 
+    socket.close();
+  }
+  clearTimeout(reconnectTimer);
   clearInterval(watchdogTimer);
   clearInterval(nowTimer);
   clearInterval(chartTimer);
+  clearInterval(clockTimer);
 })
 </script>
 
 <style>
 body { font-family: 'Pretendard', sans-serif; background-color: #F9FAFB; }
-/* PDF 캡처 시 버튼 등을 제외하고 싶다면 클래스로 제어 가능 */
 @media print { .no-print { display: none; } }
 </style>
